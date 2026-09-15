@@ -17,209 +17,142 @@
 
 ## Abstract
 
-[CEP 30](./cep-0030.md) standardizes a fixed set of virtual packages and makes detecting them an obligation of the client.
-A client can therefore only detect the names it was written to support; packages cannot depend on detection of other system capabilities.
-
-This CEP defines a *detection plugin*: an ordinary conda package with an executable of the same name that reports virtual packages as JSON on standard output.
-It specifies installation in an isolated environment, execution and resource bounds, report validation, and how verdicts enter the solve, are cached, and are overridden.
-
-A plugin can be written in any language, and any client that can install a conda package and start a process can run one.
-A *registration source* determines which plugins to run.
-[CEP XXXX (Channel-provided virtual package plugins)](./cep-XXXX.md) defines the first registration source: a channel registering plugins in its `repodata.json`.
+A detection plugin is an ordinary conda package with a same-named executable that reports virtual packages as JSON.
+This CEP defines its isolated installation, execution, report, solver integration, overrides and caching, independently of the client or implementation language.
+Registration sources decide which plugins participate; [CEP XXXX](./cep-XXXX.md) defines channel-provided registrations.
 
 ## Motivation
 
-The set of virtual packages in CEP 30 is closed, and extending it requires a CEP per name (as [CEP 46](./cep-0046.md) did for `__cuda_arch`).
-That process suits capabilities shared across the ecosystem, but is less practical for:
+[CEP 30](./cep-0030.md) standardizes virtual packages that clients must detect, but adding a name requires another CEP and new detection requires client updates.
+External MPI installations, site-specific license servers or kernel modules, and vendor accelerator stacks need detection that their maintainers can distribute without waiting for every client to release.
 
-- **Accelerator and interconnect stacks.** ROCm, oneAPI, Metal, Infiniband, TPUs and NPUs each need version and capability detection.
-  These matter to the channels shipping builds against them.
-- **Site-specific capability.** An organization's internal channel may need to detect a license server, a filesystem, a kernel module or a CPU feature that public channels do not use.
-- **Capabilities that change faster than clients release.** A new GPU generation is a new value for an existing name.
-  Today every client has to release an update to detect it, even when the party building for it already knows how.
-
-conda provides a virtual package hook through the plugin manager introduced by [CEP 4](./cep-0004.md).
-It is a Python interface and cannot be used by mamba or Pixi.
-Conda discovers plugins in the Python environment it runs from.
-A plugin can be installed as an ordinary dependency, but adding it to the environment being solved does not make it available to the conda process performing that solve.
-The conda-forge external MPI detector uses this hook and works only in conda.
-
-A client-independent plugin definition and execution protocol would let any registration source register a detector and let every client reach the same verdict on the same machine.
+conda's [CEP 4](./cep-0004.md) Python plugin hook supports this, but mamba and Pixi cannot use it.
+conda discovers hooks in the Python environment running conda, not the environment being solved: installing a hook as a dependency there does not make it available to the current solve.
+The conda-forge external MPI detector uses that hook, not the executable protocol proposed here.
+A language-independent protocol lets sites, vendors and channels supply detection to all clients without installing tooling into the client itself.
 
 ## Specification
 
-### Terminology
+### Registrations
 
-- A **plugin** is a conda package that satisfies [The plugin package](#the-plugin-package).
-- A **registration** tells a client to run one plugin.
-  It consists of:
-  - the **origin**: an identifier for where the registration came from, whose form the registration source defines (for a channel, its base URL);
-  - the **plugin name**: the name of the plugin package, which is also the name of the executable to run;
-  - the **declared names**: a non-empty set of valid virtual package names the plugin answers for;
-  - the **resolution channels**: an ordered, non-empty list of channels the plugin and its dependencies are resolved from.
+A **registration** consists of four fields:
 
-  The pair of origin and plugin name identifies a registration for purposes such as disabling or pinning it.
-- A **registration source** is a specification that produces registrations.
-  This CEP defines none.
-  A specification defining a registration source MUST guarantee that, within one solve, at most one registration carries any given declared name, and MUST say how a client reaches that state when the source's data does not provide it.
-  It MUST also say whose consent a registration carries; see [Security considerations](#security-considerations).
-- The **registrant** is the party that made a registration.
-- A **verdict** is what a plugin says about one declared name: present with a version and build string, or absent.
-- The **closure** of a registration is the set of package records the client resolved for the plugin, as described in [Resolution](#resolution).
-  The **detector environment** is the conda environment those records are installed into, and its **digest** is the identifier defined in [Identity](#identity).
-- The **host platform** is the platform of the machine the client runs on, what CEP 30 calls the native platform.
-  The **target platform** is the platform a solve is for.
-  They are usually, but not necessarily, the same.
-- A declared name is **wanted** in a solve unless an [override](#overrides) supplies it, or the registration source has assigned it to a different registration.
-  A registration is **live** in a solve when it is not disabled by the user (see [What a client tells the user](#what-a-client-tells-the-user)) and at least one of its declared names is wanted.
-  Only live registrations are run.
+- **Origin:** an identifier defined by the registration source, such as a channel's base URL.
+- **Plugin name:** the package name, also used as the executable name, normalized to lowercase.
+- **Declared names:** a non-empty set of virtual package names the plugin reports on.
+- **Resolution channels:** an ordered, non-empty list of channels from which to resolve the plugin and its dependencies.
 
-### Virtual package names
+Origin and plugin name together identify a registration, including for disabling or pinning it.
+A **registration source** is a specification that supplies these fields; this CEP defines none.
+It MUST define whose consent a registration carries and how a user withholds it.
+It MUST assign each name and override variable to at most one registration per solve, define how collisions are resolved, and define how invalid declared names are handled without passing them to the client.
+These assignments determine which results may enter the solve, not which names the plugin must report.
 
-A declared name MUST satisfy the package name rules of CEP 26 and MUST begin with two underscores.
-Concretely it MUST match:
+Declared names MUST satisfy [CEP 26](./cep-0026.md), begin with two underscores, contain at most 64 characters, and match:
 
 ```re
 ^__[a-z0-9][._-]?([a-z0-9]+(\.|-|_|$))*$
 ```
 
-and MUST NOT exceed 64 characters.
-
-The **override variable** of a declared name is `CONDA_OVERRIDE_` followed by the name without its two leading underscores, uppercased, with every `-` and `.` replaced by `_`.
-`__acme-rocm` and `__acme.rocm` therefore both map to `CONDA_OVERRIDE_ACME_ROCM`.
-A registration source MUST NOT hand a client two declared names, in one solve, that map to the same override variable, and MUST say what it does when its data contains such a pair.
-
-A registration source MUST NOT hand a client a declared name that violates this section.
-The registration source defines how to handle such a name.
+A name's **override variable** is `CONDA_OVERRIDE_` followed by the name without its two leading underscores, uppercased, with `-` and `.` replaced by `_`.
+For example, `__acme-rocm` and `__acme.rocm` both map to `CONDA_OVERRIDE_ACME_ROCM`, so a source must resolve that collision even though the names differ.
 
 ### The plugin package
 
-A plugin is an ordinary conda package.
+A plugin MUST contain an executable named after its normalized package name in one of the [CEP 32](./cep-0032.md) environment `PATH` directories.
+On Windows it MUST have an `.exe`, `.cmd` or `.bat` extension.
 
-- It MUST contain an executable whose file name is the plugin name in its normalized (lowercase) form, in one of the directories that [CEP 32](./cep-0032.md) puts on `PATH` when the environment is activated.
-  On Windows the file MUST carry an `.exe`, `.cmd` or `.bat` extension.
-- It MAY have dependencies.
-- It MUST NOT depend, directly or through its dependencies, on virtual packages other than those CEP 30 and its extensions oblige the client to provide.
-  Detection of other virtual packages depends on running plugins, so those packages cannot be prerequisites.
-- It and its dependencies MUST NOT rely on pre-link, post-link or pre-unlink scripts (CEP 34), because a client does not run them in a detector environment (see [Installation](#installation)).
-- It SHOULD have as few dependencies as possible, and SHOULD pin them, because each dependency adds code the user runs and can change the digest; see [Security considerations](#security-considerations).
+A plugin MAY have dependencies, but MUST NOT depend directly or transitively on virtual packages other than those CEP 30 and its extensions require clients to provide.
+The plugin and its dependencies MUST NOT rely on pre-link, post-link or pre-unlink scripts, which are not run in detector environments.
+Plugins SHOULD minimize and pin dependencies: each adds executable code and can change the environment digest.
 
-The plugin MUST be resolvable from the registration's resolution channels for the host platform.
-A plugin that cannot be resolved is a failed plugin (see [Failure](#failure)), not a broken registration: the client can only discover this by attempting resolution.
+The plugin MUST be resolvable from its resolution channels for the **host platform**, the machine running the client (CEP 30's native platform).
+Failure to resolve is a plugin failure, not a malformed registration.
 
-### The detector environment
+### Resolution and installation
 
-#### Resolution
+A client MUST resolve a registration using a [CEP 29](./cep-0029.md) MatchSpec containing only the plugin name, except that a registration source MAY require a channel qualifier naming one of the resolution channels.
+A source MUST NOT add version or build constraints; a publisher selecting a different build must serve it.
+Ordinary solver preferences, including preference for newer versions, determine the resolved build.
 
-A client MUST resolve the plugin by a [CEP 29](./cep-0029.md) MatchSpec consisting of the plugin name and nothing else, except that a registration source MAY require the MatchSpec to carry a channel qualifier naming one of the resolution channels.
-It MUST resolve against the registration's resolution channels in the given order, for the host platform, loading the `noarch` subdir alongside the host subdir.
-The solver's ordinary preference for the newest version therefore decides which build of the plugin runs.
-A registration source MUST NOT add version or build constraints to that MatchSpec; a registrant that wants a different build has to serve it.
+Resolution MUST use the resolution channels in their given order, loading their host and `noarch` subdirs, and MUST NOT use any other channel for the plugin or its dependencies.
+The only virtual packages available to this resolution MUST be the client's own CEP 30 virtual packages, honoring `CONDA_OVERRIDE_*`, never plugin results.
 
-A client MUST NOT resolve the plugin or its dependencies from any channel that is not among the resolution channels.
-The registration source chooses those channels, allowing the registrant to restrict the code the plugin can pull in.
+Before executing a plugin or consulting its result cache, a client MUST resolve it against current repodata and compute the [environment digest](#environment-digest).
+A registration-only environment lookup is insufficient: a client MUST reuse an environment only when its digest matches, otherwise install the newly resolved packages.
+Caching avoids installation and execution, not resolution; changed plugin or dependency records prevent reuse of old results.
 
-The virtual packages available to that resolution are the client's own CEP 30 virtual packages, honoring `CONDA_OVERRIDE_*`, and nothing a plugin reported.
+The **detector environment** is a dedicated conda environment containing the plugin and its resolved dependencies.
+Its installation MUST follow CEP 32 and [CEP 34](./cep-0034.md), with these restrictions:
 
-Resolution is expected to be cheap because it uses repodata already loaded for the solve and downloads nothing.
-Caching avoids installation and execution, not resolution; see [Re-resolution](#re-resolution).
+- It MUST be used only for detection, never as the target environment, an environment running the client, or a user's working environment.
+  The plugin MUST NOT become a dependency of the target environment.
+- The client MUST NOT execute any resolved package's pre-link, post-link or pre-unlink scripts, notwithstanding CEP 32 and CEP 34.
+- The client MAY skip byte compilation of `noarch: python` packages ([CEP 20](./cep-0020.md)); if performed, it SHOULD be bounded like activation.
+  This executes the resolved Python interpreter over the installed files.
+- The client MUST NOT run a plugin from an incomplete installation, and MUST prevent concurrent installations of the same digest from corrupting each other.
 
-#### Installation
+Clients MAY share an environment between registrations with identical resolved packages and decide its location and retention, subject to the digest check above.
 
-A client MUST install the closure into an environment that is used for nothing else, following the environment layout of [CEP 32](./cep-0032.md) and the package layout of [CEP 34](./cep-0034.md).
+### Environment digest
 
-- It MUST NOT install a plugin into the environment being solved for, and MUST NOT make a plugin a dependency of it.
-  The plugin informs the solve; requiring the solve to include its detection tooling would be circular.
-- It MUST NOT install a plugin into an environment the client itself runs from, or into any environment a user works in.
-  Unrelated changes in those environments would invalidate the digest as an identity for the plugin and its dependencies.
-- Notwithstanding CEP 32 and CEP 34, it MUST NOT execute pre-link, post-link or pre-unlink scripts of any package in the closure.
-- It MAY skip the byte compilation of `noarch: python` packages ([CEP 20](./cep-0020.md)), which runs the closure's own Python interpreter over the closure's own files at install time.
-  A client that performs it SHOULD bound it as it bounds activation.
-  Trusting a registration therefore allows execution of the executable, the libraries it loads, the closure's activation scripts, and at most that byte compilation.
-- It MAY share one environment between registrations whose closures are identical, since the digest is the same.
-- It MUST NOT run a plugin from an environment whose installation did not complete, and MUST make sure two concurrent installations of the same digest do not corrupt each other.
+A client MUST compute the digest from every resolved package record, including the plugin, as follows:
 
-This CEP does not say where on disk a detector environment lives.
-
-#### Identity
-
-The digest of a closure is computed as follows.
-
-1. For every package record in the closure, form the line `<name>\t<version>\t<build>\t<artifact>`, where:
-   - `<name>` is the record's package name in normalized (lowercase) form;
-   - `<version>` and `<build>` are the record's `version` and `build` strings verbatim;
-   - `<artifact>` is the record's `sha256` in lowercase hexadecimal if the record carries a non-null one, otherwise its `md5` in lowercase hexadecimal if it carries a non-null one, otherwise the record's file name (`fn`).
+1. Form `<name>\t<version>\t<build>\t<artifact>` for each record.
+   Use the normalized lowercase name and verbatim `version` and `build` strings.
+   For `<artifact>`, use non-null `sha256` in lowercase hexadecimal, otherwise non-null `md5` in lowercase hexadecimal, otherwise the file name (`fn`).
 2. Sort the lines bytewise ascending.
-3. Join them with `\n`, without a trailing newline, encode as UTF-8, and take the SHA-256, rendered as lowercase hexadecimal.
+3. Join with `\n` without a trailing newline, encode as UTF-8, and compute SHA-256, rendered as lowercase hexadecimal.
 
-CEP 26 rules out tabs and newlines in every field used.
-Two artifacts of one build in different formats (`.tar.bz2` and `.conda`) have different hashes and therefore different digests because they are different files.
-
-The digest identifies the closure for caching, reporting, pinning and approval; see [Security considerations](#security-considerations).
-
-#### Re-resolution
-
-A client MUST NOT run a plugin from a detector environment it looked up by registration alone.
-Before running a plugin, and before consulting its verdict cache for that registration, a client MUST resolve the registration against current repodata and compute the digest.
-It MAY then serve a cached verdict whose key matches (see [Caching](#caching)), and otherwise MUST reuse an existing environment only if the digest matches, installing a new one if not.
-
-When a registrant publishes an update that resolves to a new closure, its digest changes and the old closure's verdicts are not reused.
+CEP 26 excludes tabs and newlines from these fields.
+Different archive formats of a build have different artifact hashes and therefore different digests.
+This is a fingerprint of the resolved records for caching, reporting and exact digest pins, not proof of artifact authenticity or unchanged installed code.
+The same records produce the same digest across clients regardless of solver output order.
 
 ### Running a plugin
 
-To obtain verdicts from a live registration, a client:
+The **target platform** is the platform being solved for.
+A client MUST NOT run plugins when it differs from the host platform.
+For such a solve, plugin-provided names are absent unless overridden, except for values the client must provide under CEP 30 and its extensions for that target.
+The client SHOULD warn once per skipped registration and name its override variables.
 
-1. MUST compute the activated environment by evaluating the environment's activation scripts as it would for any conda environment, so that a plugin relying on activation scripts, `LD_LIBRARY_PATH`, or similar behaves as it would when used normally.
-   This executes the activation scripts of every package in the closure; see [Security considerations](#security-considerations).
-   Output of the activation step MUST NOT be read as part of the report.
-   A failed activation is a plugin failure.
-2. MUST place the environment's `PATH` directories, as CEP 32 orders them, ahead of the inherited `PATH`, so the plugin finds its own helpers before anything on the host.
-3. MUST execute the executable whose file name is the normalized plugin name, looked up in those directories in that order.
-   On Windows it MUST look for the `.exe`, `.cmd` and `.bat` extensions, in that order within a directory.
-   If no such executable exists, the plugin has failed.
-   The executable MUST be started with no arguments, with nothing on standard input, and with the activated environment; the working directory is unspecified.
-4. MUST capture standard output, which carries the report, separately from standard error, which carries diagnostics.
-   Both streams count against the same output bound.
+A client MUST NOT run a registration disabled by the user, lacking the source's required consent, or with no declared names still assigned to it and not overridden.
+Otherwise it obtains results from a valid cache entry or executes the plugin, subject to the following optimization.
 
-A plugin MUST exit with status `0` on success.
-A non-zero exit is a plugin failure.
-A plugin that exits `0` with only whitespace on standard output has also failed.
-This includes plugins that mistakenly write their report to standard error; the client does not interpret this as "nothing detected".
+A client SHOULD avoid execution when none of a plugin's applicable declared names can affect the solve.
+It MAY conservatively scan the `depends` and `constrains` fields of records fetched for the solve, from full or sharded repodata, together with user-requested specs.
+It MUST NOT skip a registration whose applicable names the solve could reference, and MUST NOT rely on exact prediction or on skipping for correctness.
 
-#### Bounds
+To execute a plugin, the client MUST:
 
-A client MUST bound a plugin run.
+1. Evaluate the detector environment's activation scripts as for normal activation, including those of its dependencies, and exclude activation output from the report.
+   Failed activation is a plugin failure.
+2. Prepend the environment's `PATH` directories in CEP 32 order to the inherited `PATH`.
+3. Find the normalized plugin executable only in those directories, in that order.
+   On Windows, try `.exe`, `.cmd` and `.bat` in that order within each directory.
+   A missing executable is a plugin failure.
+4. Start it with no arguments, no input on standard input, and the activated environment; the working directory is unspecified.
+5. Capture standard output as the report, separately from standard error as diagnostics.
 
-- **Time.** A client MUST apply a timeout to the detector process and MUST terminate a process that exceeds it.
-  It SHOULD also terminate the process's descendants, since a helper can keep the output pipe open after the detector times out.
-  The clock starts when the process is spawned; it excludes resolution, installation and activation.
-  The timeout SHOULD default to **30 seconds**.
-  A client MAY let a user raise it, but MUST NOT allow any timeout longer than **300 seconds**, to limit how long detection can delay the start of a solve.
-  The activation step MUST be bounded separately, with the same default and ceiling, and a timed-out activation is a plugin failure.
-- **Output.** A client MUST stop reading once **1 MiB** (1,048,576 bytes) of standard output and standard error combined has been read, MUST terminate the process if it is still running, and MUST treat the plugin as failed.
-  The bound is the same for every plugin.
-  A valid report is small (see [Size limits](#size-limits)), so this bound primarily limits diagnostics.
+A successful plugin MUST exit with status `0` and produce a non-whitespace report on standard output.
+A nonzero exit, empty output or a report written only to standard error is a plugin failure.
 
-Diagnostics a plugin wrote to standard error before a bound was exceeded MUST be kept and reported when the run fails.
-This preserves information for diagnosing and reporting failures without allowing an unbounded diagnostic stream to exhaust client memory.
+Execution MUST have the following bounds:
 
-#### Failure
+- **Time:** the client MUST time out and terminate the process, and SHOULD terminate its descendants.
+  The clock starts at process spawn, excluding resolution, installation and activation.
+  The timeout SHOULD default to **30 seconds**; clients MAY let users raise it, but MUST NOT allow more than **300 seconds**.
+  Activation MUST be bounded separately with the same default and ceiling; its timeout is a plugin failure.
+- **Output:** after reading **1 MiB (1,048,576 bytes)** of standard output and standard error combined, the client MUST stop reading, terminate a still-running process, and fail the plugin.
+  This bound is fixed for all plugins, including reports containing unknown keys or escaped strings.
 
-A plugin has failed when the plugin cannot be resolved or installed, activation fails or times out, the executable is missing, the run exceeds a bound, the process exits non-zero, the report is empty or malformed, the plugin violates [the contract](#the-contract), or the registration source declares the registration failed (for example a pinned digest that does not match).
-
-- A failed plugin MUST NOT abort the solve on its own.
-- A failed plugin's verdicts MUST NOT enter the solve, including verdicts for names it did report correctly.
-  Every declared name of the registration is absent for that solve, unless an [override](#overrides) supplies it or CEP 30 obliges the client to provide it, in which case the client's own value stands (see [Interaction with client-detected virtual packages](#interaction-with-client-detected-virtual-packages)).
-  The solver then reports an unsatisfiable dependency on an absent name in the ordinary way.
-- A client MUST report every plugin failure to the user, together with the diagnostics it captured, whether or not the solve succeeds.
-  A failure may not affect the current solve but may explain a later unsatisfiable dependency.
+The client MUST retain diagnostics captured on standard error before a bound was reached for [failure reporting](#failure-handling).
 
 ### The report
 
-A plugin MUST write exactly one JSON object, encoded as UTF-8, to standard output, and nothing else but whitespace around it.
-Anything else, including a top-level array, more than one value, or trailing text, is a malformed report.
-
-A plugin registered for `__cuda`, `__cuda_arch` and `__cuda_mps` reports:
+A plugin MUST write exactly one UTF-8 JSON object to standard output, with only whitespace around it.
+Arrays, additional values and trailing text are malformed.
+For a registration declaring `__cuda`, `__cuda_arch` and `__cuda_mps`:
 
 ```json
 {
@@ -237,369 +170,148 @@ A plugin registered for `__cuda`, `__cuda_arch` and `__cuda_mps` reports:
 }
 ```
 
-- `version: int`.
-  Required.
-  The version of the report format.
-  MUST be the integer `1` at this time.
-  A missing or unsupported version is a plugin failure because the client cannot interpret the remaining keys.
-- `virtual_packages: dict[str, dict | null]`.
-  Required.
-  One entry per virtual package the plugin gives a verdict about, keyed by name; keys are compared in normalized form.
-  - A **dictionary** value means the virtual package is present.
-    It MUST contain `version: str`, a version string as defined by CEP 33, and MAY contain `build_string: str`, which MUST satisfy the build string rules of CEP 26.
-    An absent `build_string` means `0`, the default CEP 30 gives virtual packages.
-    The CEP standardizing a name decides which information belongs in the version and which in the build string.
-    For a name no CEP standardizes, the registrant decides, and SHOULD put a version in the version so that ordinary version constraints work on it.
-  - A **`null`** value means the virtual package is not present on this system.
-    This explicit verdict differs from an omitted name.
-- `cache: dict`.
-  Optional.
-  See [Caching](#caching).
+The object has these fields:
 
-Keys other than these MUST be ignored, at both the top level and inside a `virtual_packages` entry.
-This allows clients to use the parts of a later protocol revision they understand.
-Rejecting unknown keys would not prevent code execution: the client has already run the plugin.
-A known key with the wrong value type, including a negative or non-integer `ttl_seconds`, makes the report malformed.
+- `version`: REQUIRED integer, currently `1`. Missing or unsupported versions fail the plugin.
+- `virtual_packages`: REQUIRED object keyed by virtual package name, compared after lowercase normalization.
+  Each result MUST be either `null` (explicit absence) or an object containing a REQUIRED `version` string conforming to [CEP 33](./cep-0033.md) and an OPTIONAL `build_string` string conforming to CEP 26, defaulting to `0`.
+  The CEP standardizing a name determines its version/build semantics; otherwise the publisher decides and SHOULD use the version field for versions so ordinary constraints work.
+- `cache`: OPTIONAL object containing cache hints defined in [Caching](#caching).
 
-Because the report is keyed by name, a duplicate verdict cannot be expressed, and clients therefore need no rule for one.
+Clients MUST ignore unknown top-level keys and unknown keys inside a virtual package result.
+Known fields with wrong types are malformed, including negative `ttl_seconds`, non-integer numbers, or strings other than `"REBOOT"` for that field.
+Each decoded result version and build string MUST occupy at most 256 UTF-8 bytes.
+Each watch list MUST contain at most 32 strings, each at most 4096 UTF-8 bytes after decoding.
+Exceeding these limits makes the report malformed, independently of the execution output bound.
 
-#### Size limits
+The client MUST detect and reject duplicate entries in `virtual_packages`, including names equal after normalization.
+It MUST validate the complete report before using any result: every declared name MUST occur, and no undeclared name is allowed.
+An omitted name is a contract violation, not an absent capability; `null` expresses absence.
+Malformed reports and contract violations fail the entire plugin.
 
-A report MUST satisfy the following, measured on the decoded string values, and a report that does not is malformed:
+This full contract applies even when some names are overridden or assigned to other registrations.
+Only after validation MUST the client discard results for those names.
 
-- `version` and `build_string` of a verdict: at most 256 bytes each.
-- `watch_paths` and `watch_env`: at most 32 entries each, every entry at most 4096 bytes.
+### Results in the solve
 
-The [output bound](#bounds) applies regardless: a report that satisfies these limits but, through escaping or unknown keys, exceeds the bound has still failed.
+A present result contributes one virtual package record with its name, version and build string; `null` contributes none, subject to the standardized-name requirements below.
+Each name has at most one record for the whole solve, shared by packages from every channel, not scoped to the registration's origin.
+[CEP 29](./cep-0029.md) matching and ordinary solver behavior apply without new spec syntax or candidate-selection rules.
 
-### The contract
+For a standardized name, a client MUST use an applicable plugin's present result in place of its own detected value.
+A client MUST still provide every name CEP 30 and its extensions require: if the plugin reports `null`, fails or is skipped, the client's required value remains.
+Standardized meanings and override rules remain unchanged.
+A failed or skipped registration MUST NOT remove another registration's result, an override, or a required target-platform client value.
 
-A client MUST check that the report matches the registration before passing any verdict to the solver:
-
-- A plugin MUST give a verdict for every declared name of its registration.
-  A declared name absent from `virtual_packages` is a contract violation; `null` indicates an absent capability.
-- A plugin MUST NOT report a name that is not among its declared names.
-  Doing so is a contract violation, and the client MUST NOT let the undeclared name reach the solve.
-
-A contract violation is a plugin failure, with the consequences of [Failure](#failure): all of the plugin's verdicts are discarded, and the client reports it.
-Declared names let the user inspect a plugin's possible contributions to the solve before running it.
-
-A client MUST hold a plugin to the full contract even when only some of its declared names are wanted, and MUST discard the verdicts for names that are not wanted afterwards.
-The plugin cannot know which names the client assigned to other registrations or the user overrode.
-
-### Verdicts in the solve
-
-A registration source guarantees at most one registration per name in a solve.
-Each verdict enters the solve as a client-detected virtual package would:
-
-- A **dictionary** verdict contributes one virtual package record, with that name, version and build string, to the candidate pool.
-- A **`null`** verdict contributes no record, and the name is absent for the whole solve.
-
-A MatchSpec on a plugin-provided name matches that one record as specified by CEP 29.
-This requires no changes to MatchSpec, solvers, or the handling of specs from a command line or manifest, because each name has only one candidate.
-
-Records from all channels use the same verdict, regardless of which channel registered the plugin.
-A registrant that wants only some packages to use a name has to choose a distinctive name; verdicts are not scoped.
-
-### Interaction with client-detected virtual packages
-
-CEP 30 requires the client to provide standardized virtual packages and specifies several of their values.
-This CEP allows plugins to replace detected values while retaining the other requirements:
-
-- **A plugin verdict for a standardized name MAY replace the client's own value.**
-  Where CEP 30 or a later CEP requires a client to set a standardized name to a detected value, a client implementing this CEP MUST use a plugin's dictionary verdict for that name instead, when a live registration produced one.
-  This lets a registrant provide an improved detector for a shared capability.
-- **A plugin cannot make a standardized name disappear.**
-  A client MUST continue to provide every name CEP 30 and its extensions oblige it to provide, whatever plugins run.
-  If a plugin reports such a name as `null`, or fails, the client's own value MUST remain.
-  Otherwise a plugin's faulty detection could remove a name a CEP requires to be present.
-- **Overrides of standardized names follow the CEP that standardizes them.**
-  `CONDA_OVERRIDE_ARCHSPEC` sets a build string, `CONDA_OVERRIDE_UNIX` has no effect, and an empty `CONDA_OVERRIDE_CUDA_ARCH` means absent; those rules are unchanged, and a plugin's verdict is subject to them like the client's own detection would be.
-
-A client MUST NOT attribute a plugin-reported virtual package to its own detection, and vice versa, in anything it records for later (provenance, diagnostics, lockfile metadata if any).
+A client MUST NOT attribute plugin detection, client detection or overridden values to a different source in provenance, diagnostics or other retained information.
+[User controls](#user-controls) specifies the required plugin attribution.
 
 ### Overrides
 
-CEP 30 lets `CONDA_OVERRIDE_<NAME>` stand in for a virtual package the client detects.
-A client implementing this CEP MUST extend the same mechanism to every declared name that no CEP standardizes, using the [override variable](#virtual-package-names) of the name.
-The name alone identifies the verdict because only one registration answers for it.
+A client MUST support each nonstandard declared name's [override variable](#registrations):
 
-- The value MUST be read as a version string, optionally followed by `=` and a build string.
-  Without the `=` part the build string is `0`.
-- An **empty** value MUST mean the virtual package is **absent**, the sense [CEP 46](./cep-0046.md) gives an empty `CONDA_OVERRIDE_CUDA_ARCH`.
-  This is the only way to ask a client to behave as though hardware were missing.
-- A value that cannot be read MUST be an error rather than a warning.
-  Continuing with a detected value would conceal that the override was not applied.
+- A nonempty value MUST be parsed as a version, optionally followed by `=` and a build string; without the latter, the build string is `0`.
+- An empty value MUST mean the name is absent.
+- An invalid value MUST be an error, not a warning or a fallback to detection.
 
-An overridden name is not wanted, so a registration none of whose declared names is wanted is not live and MUST NOT be run.
-This lets users avoid running plugins on machines without the hardware, in CI, or when reproducing a bug report.
+Overrides for standardized names follow their defining CEPs instead: for example, `CONDA_OVERRIDE_ARCHSPEC` sets the build string, `CONDA_OVERRIDE_UNIX` has no effect, and empty `CONDA_OVERRIDE_CUDA_ARCH` means absence.
 
-When a registration is live but some declared names are overridden, the overrides take precedence and the plugin supplies verdicts for the remaining names.
-A verdict for an overridden name MUST be discarded rather than merged with the override, so a plugin cannot contribute a build string to a version the user supplied, or the reverse.
-
-A client MUST NOT record an overridden value as though a plugin had produced it.
-
-### Which plugins have to run (the demand scan)
-
-A client SHOULD NOT run a plugin whose declared names cannot affect the solve, to avoid unnecessary delays and failures.
-A client MAY determine the set of virtual package names that anything in the solve could reference by looking at the `depends` and `constrains` fields of the records it fetched for the solve, whether from full or sharded repodata, and at the specs the user asked for, and treat a registration none of whose declared names appear in it as not live.
-
-Because this optimization affects which plugins run:
-
-- A client MUST NOT skip a registration whose declared names the solve could reference.
-- A client MUST NOT rely on skipping for correctness: the scan provides a bound on the names a solve could reference, not an exact prediction.
-
-### Target platform
-
-A plugin answers for the host platform.
-When the target platform of a solve is not the host platform, a client MUST NOT run plugins for that solve.
-Every declared name of every registration is then absent unless an [override](#overrides) supplies it, and the client SHOULD warn once per registration skipped for this reason, naming the override variable to set for a solve on another machine.
+An override replaces the entire result for its name, never just the version or build string.
+A partially overridden plugin still reports all declared names, but the client MUST discard its overridden results rather than merge them.
+A fully overridden registration MUST NOT run.
+Overrides apply to names assigned by the registration source, not to shadowed names or alternative registrations.
 
 ### Caching
 
-Running a plugin can mean installing an environment and querying hardware.
-Clients SHOULD cache verdicts.
-The following rules govern reuse and invalidation.
+Clients SHOULD cache detection results.
+The report's optional `cache` object MAY contain:
 
-The `cache` object of a report MAY contain:
+| Field | Meaning |
+| --- | --- |
+| `ttl_seconds` | Nonnegative integer lifetime, or `"REBOOT"` for the current boot session. |
+| `watch_paths` | List of absolute paths whose existence or modification time is watched. Relative paths are malformed. |
+| `watch_env` | List of environment variable names whose values are watched in the client's own environment. |
 
-- `ttl_seconds: int | "REBOOT"`.
-  How long the verdicts may be reused.
-  The special value `"REBOOT"` means the verdicts may be reused until the next system reboot.
-- `watch_paths: list[str]`.
-  Absolute paths whose existence or modification time invalidates the verdicts.
-  A relative path is malformed.
-- `watch_env: list[str]`.
-  Environment variable names whose value, in the client's own environment, invalidates the verdicts.
+A caching client MUST key entries on registration identity, declared names and environment digest, resolving against current repodata before lookup as specified in [Resolution and installation](#resolution-and-installation).
+Every entry MUST expire; indefinite caching MUST NOT be expressible.
+The following rules apply:
 
-A client that caches:
+| Condition | Required behavior |
+| --- | --- |
+| No `ttl_seconds` | Expiry SHOULD default to **1 hour**. |
+| Integer lifetime | MUST clamp to at most **30 days**; `0` MUST prevent reuse. |
+| `"REBOOT"` | MUST expire at the next reboot or after **30 days**, whichever comes first. The client chooses how to observe reboot boundaries. |
+| Reboot cannot be observed | MUST use a short fallback duration, which SHOULD be **1 hour**. |
+| Watched path appears, disappears or changes modification time, or a watched variable changes value | MUST expire the entry early, never extend its lifetime. An inaccessible path counts as absent. |
 
-- MUST key every entry on the registration's identity, its declared names, and the digest of the closure.
-  A change to the registration or any package installed with the plugin then produces a new entry rather than a stale hit.
-- MUST give every entry an expiry.
-  Indefinite caching MUST NOT be expressible, because a driver upgrade could otherwise go unnoticed until the cache was cleared manually.
-- SHOULD apply a default expiry of **1 hour** when a plugin specifies no `ttl_seconds`, to cover solves in one working session while detecting hardware changes within the same day.
-- MUST NOT honor an integer `ttl_seconds` longer than **30 days**, clamping to that maximum.
-- MUST treat `"REBOOT"` as expiring at the next system reboot or after 30 days, whichever comes first.
-  The client chooses how to observe reboot boundaries, usually with a boot identifier or boot time.
-- MUST fall back to a short duration when it cannot observe reboot boundaries.
-  This fallback SHOULD be **1 hour**, for the same reason as the default.
-- MUST treat an entry as expired when any watched path has come into existence, ceased to exist, or changed its modification time since the entry was written, or when any watched variable has a different value.
-  A path the client cannot examine counts as absent.
-  These conditions expire an entry sooner than its TTL, never later.
-- MUST treat an integer `ttl_seconds` of `0` as "do not reuse", for plugins whose verdicts can change at any time.
-- MUST offer the user a way to discard cached verdicts and cached detector environments without touching anything else.
-  This lets the user correct stale detection without clearing unrelated data.
+Clients decide whether to retain detector environments between runs, subject to the digest checks.
+Cache clearing is specified in [User controls](#user-controls).
 
-Clients decide whether to retain detector environments between runs, subject to [Re-resolution](#re-resolution).
+### Failure handling
 
-### What a client tells the user
+Resolution or installation failure, failed or timed-out activation, missing executable, exceeded bounds, nonzero exit, empty or malformed report, contract violation, and source-defined failure all fail the plugin.
+A digest-pin mismatch is one possible source-defined failure.
 
-A client MUST record, for every verdict it uses, which registration produced it and the digest of the closure it came from.
-It MUST be able to show a user, on request, the registrations it knows, the closure behind each digest, and the verdicts each plugin gave.
+A failed plugin MUST NOT abort the solve on its own.
+The client MUST atomically discard all its results, including individually valid entries.
+Only that registration's applicable contribution is removed: overrides, another registration's results, and required client-provided values remain.
+Other applicable names are absent, allowing the solver to report unsatisfiable dependencies normally.
+The client MUST report every plugin failure and its captured diagnostics, even if the solve succeeds.
 
-When the digest for a registration differs from the one the client last ran for that registration, the client MUST report that, naming both digests.
-A registration source MAY require more, such as a confirmation; see [Security considerations](#security-considerations).
+### User controls
 
-A client MUST let a user disable a registration, identified by origin and plugin name, in persistent configuration, so that a misbehaving plugin can be switched off without editing the registration source.
-A disabled registration is not live.
+For each plugin result used, a client MUST record the registration and environment digest that produced it.
+On request, it MUST show known registrations, the resolved packages behind each digest, and each plugin's reported results.
+When a registration's digest differs from the one last executed, the client MUST report the old and new digests.
+A registration source MAY require further approval, and a client MAY show additional information.
+
+A client MUST provide persistent configuration to disable a registration by origin and plugin name.
+This CEP does not prescribe a configuration format.
+A client MUST also offer an operation to discard cached plugin results and detector environments without clearing unrelated data.
+
+Registration sources define whether digest pins must be offered; any pin facility MUST compare the exact [environment digest](#environment-digest), including dependencies, rather than only a plugin version or build.
+A pin mismatch MUST prevent execution and result-cache reuse for that registration and be handled as a plugin failure.
 
 ## Security considerations
 
-A registration causes third-party code to run on the user's machine before a solve completes and before any package is installed.
-A registration source MUST say whose consent a registration carries and how a user withholds it.
-This CEP specifies what runs, its resource bounds, and what information the client provides.
+Detection runs third-party code before the target environment transaction, with the user's privileges.
+Dedicated environments and resource bounds are not a sandbox: code can read files, access the network and persist.
+Consent covers the plugin and its resolved dependencies, their activation scripts, optional Python byte compilation, invoked vendor tools, and future updates allowed by dependency constraints.
+Link scripts are excluded by [Resolution and installation](#resolution-and-installation).
 
-### The trusted unit is the environment, not the package
-
-Trust in a registration extends to the whole closure of the detector environment, not just the named executable:
-
-- **Dependencies.** A plugin's dependencies are resolved and installed with it, and the detector loads their libraries and calls their helpers.
-  A detector that calls a vendor tool also trusts that tool.
-- **Activation.** [Running a plugin](#running-a-plugin) executes the activation scripts of every package that ships one.
-  This supports detectors that need settings such as `LD_LIBRARY_PATH`, but also runs code before the detector itself.
-- **Byte compilation.** Installing a `noarch: python` package runs the closure's interpreter over the closure's files, unless the client skips it.
-- **Updates.** A dependency specified as a range can resolve to a different version later.
-  Without pinning, a closure the user reviewed may differ from one run later.
-
-[Installation](#installation) forbids running link scripts.
-
-Consequences:
-
-- Anything a registration source lets a user pin MUST be expressed over the digest, because the digest is the identity that corresponds to what runs.
-  A client MUST present coarser approval of a registrant or plugin name as approval of whatever closure resolves, now and later.
-  For example, approving `rocm-detect` with unconstrained dependencies approves future versions of those dependencies too.
-- A signature requirement, where a registration source or a client imposes one, covers only the artifacts it is checked on; signing the plugin alone leaves its dependencies unattested.
-- Restricting resolution to the registration's resolution channels limits the supply chain to code the registrant can vouch for, as well as making resolution deterministic.
-
-PEP 817 also treats the provider and its dependencies together as the supply-chain risk; see [Related work](#related-work).
-
-### What is and is not bounded
-
-The mechanism limits installation, execution time, output size and contributions to the solve:
-
-- The environment is installed from the resolution channels only, and is used for detection only, never for the environment being solved.
-- Detector execution and activation are bounded in wall-clock time, and detector output in size.
-- A plugin can only contribute its declared names, and the client checks that.
-- A plugin's effect on the solve is limited to adding, changing or withholding virtual packages.
-
-These restrictions do not sandbox the closure, which runs arbitrary code with the user's privileges.
-It can read the user's files, make network requests, and persist.
-
-Consequently:
-
-- A registration source MUST define what consent a registration carries, and a client MUST NOT run a plugin for which that consent is not given.
-- [What a client tells the user](#what-a-client-tells-the-user) defines the minimum information clients provide; a client MAY show more.
-- A registrant SHOULD treat a plugin as security-relevant code and SHOULD sign it where the ecosystem's signing mechanisms permit (see [CEP 27](./cep-0027.md)), because it runs before the user has seen a transaction.
-
-## Open questions
-
-1. **Lockfile representation.**
-   [CEP 37](./cep-0037.md) lockfiles record virtual packages only as dependencies of locked packages, never as the values a solve saw.
-   Whether a lockfile should record the verdicts a solve used, and whether the registration and digest belong next to them, is a question for a revision of CEP 37 rather than for this CEP.
-   [What a client tells the user](#what-a-client-tells-the-user) requires a client to keep the information, so a lockfile format can pick it up later.
-
-## Future work
-
-- A standard way for a plugin to report *why* it decided what it did, for diagnostics, without turning the report into a log.
-- A registration source in client configuration, so that a user can run a plugin no channel registers, or a build of their own choosing.
-  Such a source would define the registration's form and consent model, reusing this CEP unchanged.
-
-## Rejected ideas
-
-### A declarative check instead of an executable
-
-A declarative hardware check could avoid arbitrary code execution, but detection often needs `ioctl`s, library probes, and vendor tools.
-A declarative form would either exclude these cases or need the expressiveness of a programming language.
-This CEP allows executable detection with mitigations for its risks rather than eliminating code execution.
-
-### WASM
-
-WASM is sandboxed by default, but clients would need to anticipate and expose every API a plugin might need.
-It also requires a language that compiles to WASM.
-Many detection plugins are expected to be short shell or Python scripts, which are easier for users to examine in an environment.
-
-### Letting a plugin report any virtual package it likes
-
-Removing the contract check would simplify clients, but declared names would no longer describe a plugin's possible contributions before code runs.
-
-### Letting a plugin enumerate its own names
-
-A second invocation mode, such as `<plugin> --names`, would let a registration consist of a plugin name alone.
-It would check the plugin against its own declarations, require a second protocol from plugin authors, and add a second process to every run.
-A registration source can instead ask the publisher to provide the names.
-
-### Letting a plugin remove a CEP 30 virtual package
-
-Treating a `null` verdict for a standardized name as authoritative would let faulty plugin detection remove a name that CEP 30 requires the client to provide.
-
-### An output bound that scales with the number of declared names
-
-An earlier draft scaled the output bound with the number of declared names.
-However, a verdict is at most a few hundred bytes, so ten verdicts occupy only a few kilobytes.
-Diagnostics and cache hints account for most of the output and do not grow with the number of names.
-A fixed bound is easier for plugin authors to work with, while [Size limits](#size-limits) independently limit the report itself.
-
-### Bounding only standard output
-
-Only stdout carries the report, but the client also buffers stderr to preserve diagnostics on failure.
-Bounding stdout alone would let a plugin exhaust client memory through stderr.
-The combined bound preserves diagnostics while limiting memory use.
-
-### Running link scripts in detector environments
-
-CEP 32 and CEP 34 require installers to run link scripts, and an earlier draft retained that requirement for detector environments.
-This allowed code execution during installation without any of the bounds in this CEP, and the expected plugins have no use for it.
-Detectors that need setup can use activation scripts, which run during the bounded activation step.
-
-### Executing plugins during `get_candidates`
-
-Resolving a virtual package when the solver first needs it would be narrower than a demand scan.
-Requiring this would force solvers to await arbitrary work mid-solve, which not all support, for little gain over a demand scan.
+A registration source MUST define consent and how to withhold it; a client MUST NOT run a plugin without that consent.
+A client MUST present approval of an origin or plugin name as approval of whatever dependencies resolve now and later, not just the currently named package.
+Exact digest pins constrain the resolved records, but do not authenticate artifacts or verify installed files.
+A signature requirement covers only the artifacts checked; signing the plugin alone does not attest its dependencies.
+Publishers SHOULD treat detection plugins as security-relevant code and SHOULD sign them when supported by the ecosystem's mechanisms, such as [CEP 27](./cep-0027.md).
 
 ## Rationale
 
-### Why an executable named after the package
+Executables support library probes, `ioctl`s and vendor tools that a declarative language would need to expose or reimplement.
+WASM would likewise require clients to anticipate host APIs and would exclude ordinary shell and Python scripts.
+Using the package name as the executable name avoids separate entry-point metadata.
 
-The package name is an identifier shared by the registration source, client and user.
-Using it as the executable name avoids separate entry-point metadata and lets a user locate the executable in one file.
+Declared names make the possible solver contribution inspectable before execution; self-enumeration would instead check a plugin against itself and add a second protocol and invocation.
+Explicit `null` and complete, atomic reports distinguish missing capabilities from broken detection rather than silently accepting partial output.
+A conservative demand scan avoids requiring solvers to await arbitrary work in a mid-solve candidate callback.
 
-### Why absence is `null` rather than omission
+The fixed combined output bound limits diagnostics as well as reports; diagnostics need not scale with declared names.
+The 30-second default allows slow startup: [PR feedback](https://github.com/conda/ceps/pull/188#discussion_r3896136098) reports Python startup exceeding five seconds on loaded Windows CI.
+The 300-second ceiling permits slower systems while bounding the wait for hung detection.
+Link scripts would add unbounded installation-time execution; bounded activation provides setup instead.
 
-Explicit absence lets clients distinguish a missing capability from a broken plugin.
-An omitted verdict caused by an early return or swallowed error becomes a reported contract violation rather than a silently missing capability.
+## Open questions
 
-### Why a failure discards every verdict of the plugin
-
-Output from a plugin that violates its contract or crashes after writing part of a report is unreliable.
-Keeping apparently valid verdicts would make the solve depend on which part arrived and could conceal the failure.
-
-### Why a plugin may replace a CEP 30 value
-
-CEP 30 specifies a shared detection method for `__cuda`.
-A registrant shipping CUDA packages, or the vendor, may have a newer driver API, access to a platform the client's authors could not test, or knowledge of a case where the standard method is wrong.
-A plugin can supply that detection to every client without a CEP per correction, while retaining the standardized name's meaning.
-It cannot remove a name the client is required to provide.
-
-### Why a mandatory cache expiry
-
-Without expiry, cached verdicts could remain in use after the hardware or software they describe changes.
-`"REBOOT"` covers state expected to remain stable during a boot session but potentially change when hardware, drivers, the kernel, or daemons are reinitialized.
-The 30-day clamp prevents indefinite reuse on machines that never reboot.
-Clients that cannot observe reboot boundaries fall back to a short duration.
-`watch_paths` and `watch_env` can only shorten an entry's lifetime.
-
-### Why the timeout numbers
-
-Detection delays the solve, so a timeout ceiling limits how long a slow or hung plugin can make the user wait.
-
-The available measurements do not support a smaller default.
-conda's own CUDA detector waits up to 60 seconds for a subprocess.
-rattler's CUDA probe takes 1.5 seconds on an idle GPU on Windows before any interpreter has started, and a Python interpreter on a loaded Windows CI runner can take longer than 5 seconds to print a line.
-A shorter default could cause detection failures on slow CI that appear as solve failures.
-
-The ceiling is ten times the default to allow users to wait longer for a slow machine or plugin.
-Five minutes covers all detection times and hardware known to the authors while limiting the wait for a hung plugin.
-
-### Why plugins do not run for another target platform
-
-An earlier draft left cross-platform behavior open.
-A plugin detects the machine it runs on: a `linux-64` plugin cannot determine the capabilities of a `win-64` target.
-Treating declared names as absent and allowing overrides gives users a predictable, reproducible way to supply target values.
-
-### Why the digest is specified
-
-A digest used in configuration pins or bug reports needs to identify the same closure across clients.
-The specified rendering produces the same digest for the same records, regardless of solver output order.
+- **Lockfiles:** [CEP 37](./cep-0037.md) records virtual packages as dependencies, not the values a solve used.
+  Recording detection results, registrations and digests belongs in a CEP 37 revision; [User controls](#user-controls) already requires clients to retain that information.
+- **Structured explanations:** a future report extension could explain detection decisions without treating logs as protocol data.
+- **Client-configured registrations:** a future source could register plugins absent from channel metadata or user-selected builds, defining its own registration form and consent while reusing this protocol.
 
 ## Related work
 
-### conda's Python plugin hook
-
-[CEP 4](./cep-0004.md) introduced conda's plugin manager, which provides a `conda_virtual_packages` hook.
-Plugins are Python distributions with an entry point in the `conda` group, discovered in the environment running conda.
-They yield a name, version and build string, with the same `CONDA_OVERRIDE_*` handling retained here.
-This CEP uses that verdict format but supports other clients and resolves detectors separately from the environment running the client.
-An earlier proposal for a language-neutral plugin, an executable on `PATH` printing JSON, was withdrawn in favor of this one.
-
-### PEP 817, wheel variants
-
-[PEP 817](https://peps.python.org/pep-0817/), *Wheel Variants: Beyond Platform Tags*, proposes a similar mechanism for Python packaging.
-Package metadata advertises a **variant provider** package, which an installer may resolve into an isolated environment and run to detect system capabilities before selecting an artifact.
-The static portion is now [PEP 825](https://peps.python.org/pep-0825/); provider execution and trust remain in the draft PEP 817.
-This roughly parallels the separation between this CEP and its registration sources.
-
-The proposals differ in the plugin's role in selection.
-A PEP 817 provider owns a property namespace, defines its vocabulary, identifies properties compatible with the running system, and supplies the priority order for ranking variants.
-It is part of the selection algorithm.
-
-A plugin in this CEP reports only virtual packages with a name, version and optional build string.
-CEP 29 MatchSpec and the ordinary solver handle selection.
-This limits the plugin's influence on the solve to `name`/`version`/`build_string` triples and allows mechanical checking of the [contract](#the-contract).
-
-Both proposals make resolution depend on running third-party code, and both treat that as a security-relevant step.
-PEP 817 requires that installers "MUST NOT install or run provider packages, unless they can determine the particular provider package version to be trusted", leaves the mechanism to implementations, and expects a vetted pool of providers so that common ones need no explicit opt-in.
-PEP 817 also treats the provider and its dependencies as a supply-chain unit, as described here in [The trusted unit is the environment, not the package](#the-trusted-unit-is-the-environment-not-the-package).
+[PEP 817](https://peps.python.org/pep-0817/) proposes executable wheel-variant providers; [PEP 825](https://peps.python.org/pep-0825/) covers the static package format.
+A provider defines a property namespace and ranks compatible variants, whereas this CEP supplies only virtual package records for ordinary MatchSpec and solver selection.
+Both mechanisms introduce third-party execution and dependency trust; PEP 817 requires a trusted provider version before installation or execution but leaves the trust mechanism to clients.
 
 ## References
 
