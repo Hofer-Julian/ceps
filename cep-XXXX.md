@@ -3,7 +3,7 @@
 <table>
 <tr><td> Title </td><td> Channel-provided virtual package plugins </td></tr>
 <tr><td> Status </td><td> Draft </td></tr>
-<tr><td> Author(s) </td><td> Wolf Vollprecht &lt;wolf@prefix.dev&gt;<br/>Tobias Hunger &lt;tobias@prefix.dev&gt;</td></tr>
+<tr><td> Author(s) </td><td> Julian Hofer &lt;julian@prefix.dev&gt;, Wolf Vollprecht &lt;wolf@prefix.dev&gt;, Tobias Hunger &lt;tobias@prefix.dev&gt;</td></tr>
 <tr><td> Created </td><td> Aug 5, 2026</td></tr>
 <tr><td> Updated </td><td> Sep 14, 2026</td></tr>
 <tr><td> Discussion </td><td> https://github.com/conda/ceps/pull/188 </td></tr>
