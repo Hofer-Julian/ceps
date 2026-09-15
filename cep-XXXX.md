@@ -17,26 +17,23 @@
 
 ## Abstract
 
-[CEP XXXX (Virtual package detection plugins)](./cep-XXXX-detection-plugins.md), below "the plugin CEP", defines what a detection plugin is and how a client runs one, but not where a client learns which plugins to run.
-This CEP is the first *registration source* for it: a channel declares, in the `info` dictionary of its `repodata.json`, that a package it serves is a detection plugin for one or more virtual packages.
-A client resolving that channel runs the plugin as the plugin CEP specifies, and the reported values take part in the solve exactly as a client-detected virtual package does.
+[CEP XXXX (Virtual package detection plugins)](./cep-XXXX-detection-plugins.md), below "the plugin CEP", defines detection plugins and how clients run them, but not how clients discover them.
+This CEP defines the first registration source: a channel declares, in the `info` dictionary of its `repodata.json`, that a package it serves is a detection plugin for one or more virtual packages.
+A client resolving that channel runs the plugin as specified by the plugin CEP and uses its reported values in the solve like client-detected virtual packages.
 
-The mechanism is deliberately narrow.
 A plugin answers only for names its channel advertised, its dependencies come only from that channel and the channels it relates to, and its verdicts can be overridden or suppressed from the environment.
 Virtual package names are assumed to be unique across channels, and a channel introducing one SHOULD build its own name into it.
-Configuring a channel is what consents to running its plugins, for the reasons given in [Security considerations](#security-considerations).
+Configuring a channel consents to running its plugins; see [Security considerations](#security-considerations).
 
 ## Motivation
 
-The plugin CEP explains why detection has to be extensible.
-This CEP is about who gets to extend it, and the answer is the channel, because the channel is where the knowledge already lives:
+The plugin CEP explains why detection needs to be extensible. Channels provide the detection code because:
 
-- The party that builds packages against a capability knows how to detect it, typically by depending on a vendor tool and wrapping it in a short script, and is already shipping conda packages.
-- A user who adds a channel to install its packages should not need a second, undocumented step to make those packages installable.
-  "Add the channel, and also install this plugin" is the workflow the conda-forge external MPI packages have been stuck with, and it does not scale past the people who already know.
-- Every alternative puts the detection knowledge somewhere it has to be duplicated: in each client, or in each user's configuration.
+- Package builders know how to detect the capabilities their packages depend on, typically by wrapping a vendor tool in a short script. They already ship conda packages.
+- Adding a channel should be enough to make its packages installable. The conda-forge external MPI packages currently require users to install a plugin separately, a step users need to know about in advance.
+- Maintaining detection in each client or each user's configuration duplicates that knowledge.
 
-The workarounds are worse: `CONDA_OVERRIDE_*` variables set by hand in every environment, packages that fail at runtime rather than at solve time, wrapper scripts that solve twice, or clients carrying vendor-specific detection code for hardware their authors cannot test with.
+Current workarounds include setting `CONDA_OVERRIDE_*` variables by hand in every environment, accepting runtime failures instead of solve-time errors, writing wrappers that solve twice, and maintaining vendor-specific detection in clients whose authors cannot test the hardware.
 
 ## Specification
 
@@ -47,7 +44,7 @@ Registration, origin, declared names, resolution channels, live registration, cl
 Package names are compared in their normalized form, which per CEP 26 is the lowercase form.
 
 The **loaded subdirs** of a channel, for a solve, are the subdirs the client fetched from that channel for the solve.
-CEP 42 recommends that these be the subdir of the target platform and `noarch`, and this CEP assumes that; a client that loads more subdirs treats their registrations the same way.
+CEP 42 recommends loading the target platform's subdir and `noarch`. This CEP assumes those subdirs; a client that loads others treats their registrations the same way.
 
 ### Registering plugins in `info`
 
@@ -66,56 +63,55 @@ If present, it MUST be a dictionary mapping a **package name** to a **non-empty 
 }
 ```
 
-A client MUST read the value of `virtual_package_plugins` as an opaque JSON value first and validate it afterwards, so that an invalid value can be reported and dropped without disturbing the parse of the rest of the document (see [Errors](#errors)).
+A client MUST first read `virtual_package_plugins` as an opaque JSON value, then validate it. This lets the client report and drop an invalid value without disrupting the rest of the document (see [Errors](#errors)).
 
 - Each key MUST be the name of a package the declaring channel serves in one of its subdirs.
-  It is the plugin name of the registration, and the plugin CEP makes it the name of the executable to run.
-  It MUST therefore be a valid *package* name and MUST NOT be a virtual package name: nothing serves a virtual package, so a key carrying the `__` prefix cannot name the package a client would install.
-  A key that is not a valid package name is an error, and a client encountering one MUST treat it as such rather than ignoring the entry: the key names code the client is being asked to run, and a channel that got it wrong has not said what it meant.
-  A key that is a valid package name the channel does not serve is not detectable at this point; the plugin then fails at resolution, as the plugin CEP describes.
+  This is the registration's plugin name, which the plugin CEP also uses as the executable name.
+  It MUST therefore be a valid *package* name and MUST NOT be a virtual package name: a name with the `__` prefix cannot identify an installable package.
+  An invalid package name is an error, and a client MUST treat it as such rather than ignoring the entry. The key identifies code to run, so an invalid key makes the channel's request unclear.
+  A valid package name that the channel does not serve cannot be detected at this stage; it fails during resolution, as the plugin CEP describes.
 - Each value MUST be the array of virtual package names that plugin speaks for.
   One plugin MAY speak for several virtual package names.
-  This is useful when an expensive query returns a set of replies: the client runs that query once and gets all of them, instead of running a set of similar plugins that each throw information away.
+  An expensive query can return several values in one run, rather than several plugins repeating the query and discarding unused results.
 - Every name in every array MUST be a valid virtual package name as the plugin CEP defines it, and SHOULD contain the channel name; see [Naming](#naming).
-  A name that is not valid MUST be dropped rather than carried into the solve, where it would fail later as an unusable dependency specification.
+  A name that is not valid MUST be dropped; otherwise it would enter the solve as an unusable dependency specification.
   Dropping it MUST NOT invalidate the other names of the same plugin, and MUST NOT invalidate the rest of the `repodata.json`: a client MUST parse registrations leniently and discard only what is invalid.
-  A client SHOULD report what it discarded, so that a channel maintainer can find the typo.
+  A client SHOULD report discarded names so that a channel maintainer can find the error.
   Plugins left with no valid name MUST be ignored.
 - One array MUST hold between 1 and 16 (inclusive on both ends) names, counted before any invalid name is dropped, and the union of a plugin's arrays across the loaded subdirs MUST hold at most 16 names, counted the same way.
   An array or union outside that range is an error.
 - One channel MUST NOT register more than 64 plugins, counted over the loaded subdirs.
-  Together with the plugin CEP's demand scan, where a client performs it, this bounds the number of environments and processes one channel can ask for.
-  A channel exceeding it is an error.
+  This bounds the environments and processes one channel can request, alongside the plugin CEP's demand scan where a client performs it.
+  Exceeding this limit is an error.
 - Additional keys in `info` beyond those CEP 36 and its extensions define SHOULD, per CEP 36, be ignored by clients that do not recognize them.
-  A client that does not implement this CEP therefore ignores `virtual_package_plugins` and behaves exactly as it does today.
+  Clients that do not implement this CEP ignore `virtual_package_plugins` and keep their existing behavior.
   CEP 36 also says such keys SHOULD NOT be present; this CEP, like CEP 42, is an extension that defines one.
 - If `virtual_package_plugins` is absent or empty, the channel registers no plugins.
 - A `virtual_package_plugins` that is present but is not a map of registrations, including an explicit `null`, is an error.
-  Absence already says "no plugins", so a channel that wrote something else meant something it failed to express, and a client MUST NOT read that as a channel with nothing to register.
+  A client MUST NOT treat such a value as an empty registration set. An absent field already represents that case.
 
 #### Subdirs
 
-Declarations are **per subdir**, like CEP 42's `channel_relations`.
+Declarations are per subdir, like CEP 42's `channel_relations`.
 A client MUST treat the registrations found in a channel's loaded subdirs as a single set.
-A plugin name that appears in more than one loaded subdir is one registration whose declared names are the union of its arrays: `linux-64` registering `x` for `["__a"]` and `noarch` registering `x` for `["__a", "__b"]` is one registration of `x` for `__a` and `__b`.
-Registrations in subdirs a client did not load for the solve play no part in it.
-A channel MAY therefore register a plugin in only some of its subdirs, which is how a plugin relevant to one platform is kept off the others, and a channel that wants a plugin everywhere registers it in `noarch`.
+A plugin name appearing in multiple loaded subdirs forms one registration, with the union of its declared-name arrays. For example, `linux-64` registering `x` for `["__a"]` and `noarch` registering `x` for `["__a", "__b"]` yields one registration of `x` for `__a` and `__b`.
+Registrations in subdirs not loaded for the solve do not participate.
+A channel MAY register a plugin in only some subdirs to restrict it to relevant platforms. Registering it in `noarch` makes it available everywhere.
 
 Over the union, a channel MUST NOT register two plugins for the same (normalized) virtual package name, MUST NOT let one plugin register the same (normalized) virtual package name twice within one array, and MUST NOT register two names that map to the same override variable of the plugin CEP.
 Within one array of one subdir a channel MUST NOT list the same (normalized) package name under two keys; a client whose JSON parser cannot see duplicate keys is not required to detect this.
 Registrations that are each valid on their own MAY still collide once merged.
-The registrations of one channel are a single set with nothing to order them by, so a client encountering a collision MUST treat it as an error, and MUST NOT resolve it by picking one of the colliding registrations or by silently collapsing them into one.
+Registrations within a channel have no ordering. A client encountering a collision MUST treat it as an error, and MUST NOT pick one of the colliding registrations or silently merge them.
 
 The declared names of a registration are the names left after invalid ones are dropped.
 
 #### Errors
 
-Where this section makes a registration an error, a client MUST report it to the user and MUST then ignore the channel's `virtual_package_plugins` in its entirety, in every loaded subdir, behaving as though the channel had registered no plugins at all.
-A client MUST NOT reject the surrounding `repodata.json` and MUST NOT abort the solve: a channel whose registrations a client cannot make sense of is still a channel whose packages it can install, and failing the document would take every package in the subdir down with one malformed entry.
+Where this section defines a registration error, a client MUST report it to the user and MUST then ignore the channel's entire `virtual_package_plugins` set across all loaded subdirs, as though the channel had registered no plugins.
+A client MUST NOT reject the surrounding `repodata.json` and MUST NOT abort the solve: malformed registrations do not prevent use of the channel's packages.
 
-Ignoring the section as a whole rather than the offending entry is deliberate.
-The errors above are all cases where the channel contradicted itself, so a client cannot tell which part of the set was meant, and acting on the remainder would be acting on a registration set whose meaning is not established.
-This is distinct from an invalid *name*, which is ignored on its own and leaves the rest of the registrations standing.
+These errors leave the intended registration set unclear. Ignoring the whole set avoids running an arbitrary subset.
+An invalid *name* is different: it can be dropped without affecting the remaining registrations.
 
 #### Sharded repodata
 
@@ -126,26 +122,25 @@ A client reads whichever of the two it loaded and is not expected to check the o
 
 ### Naming
 
-A virtual package name means one thing per solve, so a name this mechanism introduces is a name taken from the whole ecosystem.
-Channel priority decides which plugin answers for a contested name (see [Contested names](#contested-names)), and that is a mechanical answer to a mechanical question: it does not make two channels that meant different capabilities by one name mean the same thing, it just picks one of them and hides the other.
+A virtual package name has one meaning per solve and is shared across the ecosystem.
+Channel priority selects the plugin for a contested name (see [Contested names](#contested-names)), but cannot reconcile channels that use the name for different capabilities.
 
-A channel registering a plugin for a name that no CEP standardizes SHOULD therefore make that name distinctive by building its own channel name into it: `__acme_rocm` rather than `__rocm`, for a channel named `acme`.
+A channel registering a plugin for a name that no CEP standardizes SHOULD include its channel name: for example, `__acme_rocm` rather than `__rocm` for a channel named `acme`.
 The resulting name MUST still satisfy the plugin CEP's rules.
 
-The packages that depend on such a name are built by the party that registers the plugin, so no one outside that channel has to know the name, and nothing about a distinctive name makes it harder to depend on.
-What it buys is that a channel never has to coordinate with a channel it has never heard of, and that a user configuring two channels never has one channel's answer about its own hardware quietly replaced by another channel's answer about different hardware that happens to share a name.
+The registering channel also builds the packages that depend on the name. Other channels need not know it, and including the channel name does not make dependencies harder to specify.
+Distinctive names reduce the need for coordination between unrelated channels and prevent one channel's hardware detection from replacing another's because they chose the same name.
 
-Names that CEP 30 or a later CEP standardizes are the deliberate exception: they are shared on purpose, and a channel registering a plugin for one is asking to answer for it.
+Names standardized by CEP 30 or a later CEP are intentionally shared. A channel registering a plugin for one offers its own detection for that capability.
 Channels SHOULD NOT do so unless they intend to replace the client's own detection, which the plugin CEP allows but never lets remove the name.
 
 ### Contested names
 
-Two **different** channels MAY register different plugins for the same name.
-This is resolved the way anything served by two channels is resolved: the registration of the channel that comes first in the resolved channel order of the solve, as CEP 42 produces it from the user's channels, wins the name and shadows every other registration for it.
+Two different channels MAY register different plugins for the same name.
+The channel that comes first in the solve's resolved channel order, produced by CEP 42 from the user's channels, wins the name and shadows every other registration for it.
 A channel reached by more than one relation path is one channel, as it is for CEP 42.
 
-Shadowing settles which plugin answers for a name.
-It does not settle whether the two channels meant the same capability by it, which is a question no client can answer; see [Naming](#naming).
+Shadowing chooses the plugin, not the meaning of the name. A client cannot tell whether the channels meant the same capability; see [Naming](#naming).
 
 - A shadowed name is not wanted, in the plugin CEP's sense, for the registration that lost it.
   A registration all of whose names are shadowed is therefore not live and MUST NOT be run.
@@ -153,7 +148,7 @@ It does not settle whether the two channels meant the same capability by it, whi
 - A registration shadowed for only some of its names is run if it is otherwise live, held to the full contract as the plugin CEP requires, and its verdicts for shadowed names are discarded.
 - An override applies to the name, so it reaches whichever registration won the name; a registration that lost a name never sees an override for it.
 
-Once shadowing has been applied, every name is answered by at most one registration, which is the guarantee the plugin CEP asks a registration source for.
+After shadowing, at most one registration answers for each name, as the plugin CEP requires of a registration source.
 
 ### Resolution channels
 
@@ -164,16 +159,14 @@ The plugin package itself MUST be resolved from the registering channel: the Mat
 Its dependencies come from the resolution channels.
 A client MUST NOT resolve either from any other channel the user happens to have configured.
 
-A channel's registration therefore reaches only code that channel's own relations reach.
-Resolving against the user's whole channel list would make the plugin's supply chain a property of the user's configuration rather than of the registering channel, and would let one channel's registration pull code out of an unrelated one.
+The registering channel and its relations determine the plugin's supply chain. Using the user's full channel list would allow a registration to pull code from unrelated channels.
 
 The origin of a registration is the registering channel's base URL as CEP 26 defines it.
 
 ### Which registrations take part in a solve
 
-A registration takes part in a solve when its channel does: because the user configured the channel, or because a CEP 42 relation of a configured channel brought it in.
-Channel relations bring a registration into a solve; they do not scope a verdict once it is there.
-A record served by any channel sees the same verdict, whether or not the channel that served it registered the plugin.
+A registration participates when its channel does, whether configured by the user or included through a configured channel's CEP 42 relations.
+Relations determine which registrations participate, but do not scope their verdicts. Records from every channel see the same verdict, whether or not their channel registered the plugin.
 
 Every registration that takes part in a solve and is live, in the plugin CEP's sense, MUST be run, subject to the plugin CEP's target platform rule.
 
@@ -182,22 +175,21 @@ Every registration that takes part in a solve and is live, in the plugin CEP's s
 Configuring a channel, directly or through a relation of a configured channel, is the consent to run the plugins it registers.
 
 A client MUST NOT run a plugin registered by a channel that takes no part in the solve.
-Nothing beyond configuring the channel is needed for a live registration to run, so that a user who adds a channel gets its packages installable without discovering a second setting.
-The rationale is in [Security considerations](#security-considerations).
+No additional setting is needed to run a live registration. This lets users install a channel's packages without a separate plugin setup step; see [Security considerations](#security-considerations).
 
-What a user can always do, and a client MUST offer in persistent configuration:
+A client MUST offer the following controls in persistent configuration:
 
 - Disable every registration of a channel, identified by origin, and disable a single registration, identified by origin and plugin name, as the plugin CEP requires.
 - Pin a registration to a digest.
   A client MUST treat a pinned registration whose resolved digest differs as a failed plugin, reporting both digests.
-  This is the exact-trust mode for users who want to review what runs.
+  Pinning lets users review the exact code they permit to run.
 - Override any plugin-provided name, or declare it absent, with `CONDA_OVERRIDE_*`.
 - Clear cached verdicts and detector environments.
 
-What a user can always see: what ran, from which registration, with which digest, and when a digest changed, as the plugin CEP requires of every client.
+The plugin CEP requires clients to show what ran, its registration and digest, and any digest changes.
 
 A client MAY require some form of opt-in before running a registered plugin.
-This CEP does not specify one, and a client that requires none is conformant.
+This CEP does not prescribe an opt-in; clients that require none are conformant.
 
 ## Examples
 
@@ -230,9 +222,9 @@ This CEP does not specify one, and a client that requires none is conformant.
   "cache": { "ttl_seconds": 86400, "watch_paths": ["/sys/module/amdgpu/version"] } }
 ```
 
-Solving `mytool` against this channel: the client installs `rocm-detect` into a detector environment, runs it, obtains `__rocm 6.2.1`, and `mytool 2.0.0` becomes installable.
-`mytool`'s `__rocm >=6.0` is matched against `6.2.1` like any other dependency, against the one `__rocm` record the verdict contributed.
-On a machine without ROCm the same plugin prints `{"version": 1, "virtual_packages": {"__rocm": null}}` and `mytool` is correctly reported as unsatisfiable rather than installing and failing at runtime.
+When solving `mytool` against this channel, the client installs `rocm-detect` into a detector environment and runs it. The reported `__rocm 6.2.1` makes `mytool 2.0.0` installable.
+The dependency `__rocm >=6.0` matches the single `__rocm` record contributed by the verdict, using ordinary dependency matching.
+On a machine without ROCm, the plugin prints `{"version": 1, "virtual_packages": {"__rocm": null}}`. The client reports `mytool` as unsatisfiable instead of installing a package that would fail at runtime.
 
 ### One plugin, several virtual packages
 
@@ -247,7 +239,7 @@ On a machine without ROCm the same plugin prints `{"version": 1, "virtual_packag
     "__cuda_arch": { "version": "8.9", "build_string": "0" } } }
 ```
 
-One process answers for both, which is why registrations are keyed by plugin rather than by virtual package: the client runs it once.
+The client runs one process for both names. Keying registrations by plugin makes this grouping explicit.
 
 ### A name of one's own
 
@@ -257,8 +249,8 @@ One process answers for both, which is why registrations are keyed by plugin rat
 { "virtual_package_plugins": { "acme-detect": ["__acme_gpu"] } }
 ```
 
-Nothing else in the ecosystem is likely to use `__acme_gpu`, so no other channel can contradict it, and `acme` can ship packages depending on it without coordinating with anyone.
-Had `acme` registered `__gpu` instead, it would have taken a name any other channel (or the conda community) might reasonably want for its own virtual packages.
+The distinctive name `__acme_gpu` avoids conflicts with other channels and lets `acme` ship dependent packages without coordination.
+The generic name `__gpu` would be more likely to conflict with another channel's virtual packages or a name chosen by the conda community.
 
 ### Availability through a CEP 42 relation
 
@@ -266,19 +258,16 @@ Had `acme` registered `__gpu` instead, it would have taken a name any other chan
 Resolving `derived` resolves `rocm-channel` too, so `rocm-channel`'s registration takes part in the solve and `rocm-detect` runs.
 A package from `derived` with `depends: ["__rocm >=6.0"]` is matched against the verdict, exactly as a package from `rocm-channel` is.
 
-The relation is what brought the registration into the solve; it does not scope the verdict.
-`__rocm` has one value here, and both channels' packages see it.
+The relation includes the registration in the solve but does not scope the verdict: both channels' packages see the same `__rocm` value.
 
 ### Two channels, one name
 
-`https://a.example/chan-a` and `https://b.example/chan-b` both register a plugin, different packages, for `__rocm`.
+`https://a.example/chan-a` and `https://b.example/chan-b` register different plugin packages for `__rocm`.
 
-A user configuring both gets one `__rocm`: whichever of the two channels comes first in the resolved channel order supplies the plugin, and the other channel's `rocm-detect` is shadowed for that name and not run.
-Every package in the solve is matched against the winning verdict, including packages from the channel that lost.
-Nothing fails, and nothing has to be ranked that CEP 42 does not already rank.
+When a user configures both, the first channel in the resolved channel order supplies the plugin. The other channel's `rocm-detect` is shadowed for that name and is not run.
+Every package in the solve uses the winning verdict, including packages from the shadowed channel. The conflict does not cause a failure or require ordering beyond CEP 42.
 
-That is the right outcome when both channels meant ROCm, and the wrong one when they did not: a channel that meant its own accelerator by `__rocm` has just had its detection replaced by a detector for someone else's hardware, and the packages depending on it will be resolved against an answer to a different question.
-This is what [Naming](#naming) is for.
+This works if both channels mean ROCm. If one uses `__rocm` for its own accelerator, its packages are instead resolved against detection for different hardware; see [Naming](#naming).
 Had they registered `__chan_a_rocm` and `__chan_b_rocm`, both plugins would run, both names would be available, and each channel's packages would depend on the one they meant.
 
 ### Only some subdirs
@@ -289,54 +278,51 @@ A client solving for `linux-64` loads `linux-64` and `noarch` and runs the plugi
 
 ## Compatibility
 
-- **Clients that do not implement this CEP** ignore `info.virtual_package_plugins`, as CEP 36 recommends for unrecognized `info` keys, and behave exactly as before.
-  They will fail to solve packages that depend on a plugin-provided virtual package, correctly, since they cannot determine whether the capability is present.
-- **`repodata_version` is not bumped.** The field is additive, and clients that do not know it ignore it.
-  Bumping the version would force every client to reject repodata it can otherwise use.
-- **Existing channels are unaffected.** A channel that registers nothing behaves identically.
-- **Existing packages are unaffected.** No package's metadata changes; a plugin is an ordinary package and requires no new fields in `index.json`.
-- **The CEP 30 names keep their meaning.** A client's obligation to provide them is unchanged, and a plugin cannot remove one.
+- Clients that do not implement this CEP ignore `info.virtual_package_plugins`, as CEP 36 recommends for unrecognized `info` keys, and retain their existing behavior.
+  They fail to solve packages that depend on a plugin-provided virtual package because they cannot determine whether the capability is present.
+- `repodata_version` is not bumped. The additive field can be ignored by clients that do not recognize it; a version bump would make them reject otherwise usable repodata.
+- Channels that register no plugins are unaffected.
+- Existing packages are unaffected: no package metadata changes. A plugin is an ordinary package and requires no new fields in `index.json`.
+- CEP 30 names retain their meaning. Clients remain obliged to provide them, and plugins cannot remove them.
 
 ## Security considerations
 
-**This CEP describes a mechanism by which configuring a channel causes code from that channel to be executed on the user's machine, before any solve completes and before any package is installed.**
-The plugin CEP bounds what that code is and what it can report; this section is about why configuring the channel is taken as consent, and what that costs.
+Configuring a channel allows its code to run on the user's machine before a solve completes and before any package is installed.
+The plugin CEP limits the code that runs and what it can report. This section describes the consent model and its risks.
 
 ### Why configuring a channel is consent
 
-A user who configures a channel installs its packages.
-Installing a package executes its link scripts under CEP 34, and every activation of the resulting environment executes its activation scripts.
-A detector environment is resolved from that same channel and its relations and nothing else, installing it executes at most the byte compilation the plugin CEP describes, and running it is bounded in time and output.
-Running a registered plugin therefore runs code from a party the user already runs code from, under a stricter bound than any package enjoys.
-Asking for consent a second time would be asking the user to trust a subset of what they already trust.
+Users who configure a channel install its packages. Installation executes link scripts under CEP 34, and each environment activation executes activation scripts.
+A detector environment uses only the registering channel and its relations. Its installation executes at most the byte compilation described in the plugin CEP, and plugin execution is bounded in time and output.
+It therefore runs code from an already trusted party under stricter execution limits than ordinary packages. This CEP treats that existing trust as sufficient for plugins.
 
-Consent extends through CEP 42 relations for the same reason: a related channel is a channel the user installs packages from, whether or not they typed its name.
-CEP 42 lists whether relation-loaded channels need separate consent as an open question; this CEP takes the position that, for plugins, they do not, and a client that disagrees MAY require an opt-in as [Consent](#consent) allows.
+The same reasoning applies to CEP 42 relations: users install packages from related channels even if they did not name those channels directly.
+CEP 42 leaves separate consent for relation-loaded channels as an open question. This CEP does not require it for plugins, but a client MAY require an opt-in as [Consent](#consent) allows.
 
 ### What is new
 
-Two things are new relative to installing a package, and they are the honest cost of this CEP:
+Plugin execution differs from package installation in two respects:
 
-- **Timing.** A plugin runs before the solve, so before a client that shows a transaction plan has shown it.
-  Where a client performs the plugin CEP's demand scan, a plugin runs only when the solve could reference its names, and the reporting requirements mean a user can always see afterwards what ran.
-  A client that wants a confirmation before that point MAY require one, as [Consent](#consent) allows.
-- **Scope.** A user who configured a channel for one package now runs that channel's detection whenever any dependency in a solve mentions one of its names.
-  Per-channel and per-registration disabling, and digest pinning, are the tools for a user who wants less than that.
+- **Timing.** A plugin runs before the solve and before any transaction plan.
+  Where a client performs the plugin CEP's demand scan, it runs only if the solve could reference its names. Reporting requirements let users see afterwards what ran.
+  A client MAY require confirmation beforehand, as [Consent](#consent) allows.
+- **Scope.** Configuring a channel for one package permits its detection code to run whenever any dependency in a solve mentions one of its names.
+  Users can restrict this with per-channel or per-registration disabling and digest pinning.
 
 ### What the channel is asked to do
 
-- Channels SHOULD treat a detection plugin as security-relevant code and SHOULD sign it where the ecosystem's signing mechanisms permit (see [CEP 27](./cep-0027.md)), because it is the one package that runs before the user has seen a transaction.
-- Channels SHOULD register detectors with few dependencies and SHOULD pin the ones they have, so that the closure a user sees today is the closure that runs tomorrow.
-- A channel SHOULD register a plugin only in the subdirs it is meant for, so that clients on other platforms do not have to skip it.
+- Channels SHOULD treat detection plugins as security-relevant code and SHOULD sign them where the ecosystem's signing mechanisms permit (see [CEP 27](./cep-0027.md)), because they run before the user sees a transaction.
+- Channels SHOULD register detectors with few dependencies and SHOULD pin those dependencies to keep the closure stable between runs.
+- A channel SHOULD register a plugin only in its intended subdirs, so clients on other platforms do not have to skip it.
 
 ## Open questions
 
 1. **Server-side validation.**
    Whether a channel serving a registration should be required to serve the corresponding package, and whether a registry should validate that at upload time.
 2. **Enforcing name uniqueness.**
-   This CEP assumes names are unique and recommends a convention for keeping them so ([Naming](#naming)), but nothing enforces it.
-   Where two channels claim one name, channel priority silently picks one, which is right when they meant the same capability and wrong when they did not, and a client cannot tell the two cases apart.
-   Whether the ecosystem wants a reserved-prefix rule a registry can check at upload time, a registry of the names channels have introduced, a client warning when a registration is shadowed, or nothing at all, is worth settling before this is widely used.
+   This CEP assumes unique names and recommends a naming convention ([Naming](#naming)), but does not enforce uniqueness.
+   Channel priority silently resolves conflicts. This works for channels detecting the same capability but not for channels using the name differently, and clients cannot distinguish those cases.
+   An open question before widespread use is whether to adopt an upload-time reserved-prefix check, a registry of channel-introduced names, a client warning for shadowed registrations, or no additional mechanism.
 
 ## Future work
 
@@ -348,57 +334,53 @@ Two things are new relative to installing a package, and they are the honest cos
 ### A separate metadata file for registrations
 
 A `virtual-package-plugins.json` alongside `repodata.json` would avoid touching `info`.
-Rejected: it is an extra request on every channel for a field that is almost always absent, and it would need its own caching, validation and versioning.
-CEP 42 made the same call for `channel_relations`, and consistency with it is worth more than the isolation.
+This would add a request to every channel for a field that is usually absent, plus separate caching, validation and versioning.
+Using `info` also follows CEP 42's approach for `channel_relations`, rather than isolating the field in a separate file.
 
 ### Keying registrations by virtual package rather than by plugin
 
-`{"__cuda": "cuda-detect", "__cuda_arch": "cuda-detect"}` reads more naturally, and it is the direction a client looks things up in once it knows which names a solve needs.
-Rejected: it hides that one process answers for both names, and a client would have to invert the map to avoid running the plugin twice.
-A client that wants the inverse builds it; the channel writes down the fact that is true, which is that one plugin answers for a set of names.
+`{"__cuda": "cuda-detect", "__cuda_arch": "cuda-detect"}` is easier to read and matches the lookup a client needs once it knows which names a solve references.
+However, it obscures that one process provides both names. Clients would have to invert the map to avoid running the plugin twice.
+Keying by plugin records that grouping directly; clients can build the inverse lookup when needed.
 
 ### Version constraints in registrations
 
 `{"cuda-detect >=2.0": [...]}` would let a channel demand a minimum plugin version.
-Rejected: the key is the executable's name and has to stay a bare package name, and the channel already controls which builds it serves.
-A channel that wants users off an old build stops serving it, or moves it to a label.
+The key also names the executable, so it must remain a bare package name. The channel already controls which builds it serves and can remove old builds or move them to a label.
 A later revision that needs per-registration options can accept an object in place of the array without breaking clients that only know the array.
 
 ### Per-channel views of a virtual package name
 
-An earlier draft of this CEP let a name mean different things to different channels.
-A channel answered for a name over the packages it serves and over the packages of channels below it in the CEP 42 relation graph; the channel that answered was called the *authority*, and it was a function of the name and the channel that served the record.
-Two unrelated channels could then each register `__rocm`, and each be right for its own packages.
+An earlier draft gave virtual package names per-channel meanings.
+A channel's detection applied to its own packages and to packages from channels below it in the CEP 42 relation graph. This channel was called the *authority*, determined by the virtual package name and the channel serving the record.
+Two unrelated channels could each register `__rocm` with a different meaning for their own packages.
 
-Rejected as too expensive for what it buys.
-A MatchSpec is matched by name and carries nothing about the channel of the record that declared it ([CEP 29](./cep-0029.md)), and solvers keep one candidate set per name, so `depends: ["__rocm >=6.0"]` cannot find "the right `__rocm`" on its own.
-Implementing views therefore meant qualifying names internally while the candidate pool was built, rewriting every dependency on such a name to a name derived from its authority, and then keeping those internal names out of diagnostics, out of user-written specs and out of lockfiles: a whole layer of machinery in every client, in service of a case that mostly does not arise.
-It also left a case that no channel had decided, two channels overriding one shared channel, neither ranking above the other, for which it had no answer better than refusing to solve.
+This required substantial client-side changes.
+A MatchSpec is matched by name and does not carry the channel of the record declaring it ([CEP 29](./cep-0029.md)). Solvers maintain one candidate set per name, so `depends: ["__rocm >=6.0"]` cannot select a channel-specific `__rocm`.
+Clients would need to qualify names while building the candidate pool, rewrite dependencies to authority-derived names, and hide those internal names from diagnostics, user-written specs and lockfiles. This would add machinery to every client for an uncommon case.
+It also could not resolve two unranked channels both overriding a shared channel, except by refusing to solve.
 
-Assuming names are unique removes all of it.
-One candidate per name, no rewriting, no internal names, and no new ordering relation over channels: a name claimed twice is settled by the channel priority CEP 42 already produces, the way a package served twice is.
-The cost is that two channels choosing one name for two different capabilities is no longer harmless, one of them wins for everyone, which [Naming](#naming) addresses by convention and [Open questions](#open-questions) leaves open to address by enforcement.
+Assuming unique names retains one candidate per name without rewriting, internal names or a new channel ordering. Duplicate claims use CEP 42's existing channel priority, like packages served by multiple channels.
+The tradeoff is that if two channels use a name for different capabilities, one wins for the whole solve. [Naming](#naming) addresses this by convention; [Open questions](#open-questions) discusses enforcement.
 
 ### A mandatory opt-in step
 
-An earlier draft required every client to obtain an explicit opt-in before running any channel-registered plugin, without saying what form it takes.
-Rejected: a MUST whose content is unspecified is not testable, a prompt on every new digest is the opposite of "add the channel and it works", and there is nobody to prompt in CI.
-[Consent](#consent) instead fixes what a user can always do, makes the consent boundary the one users already reason about, and leaves any further opt-in to clients.
+An earlier draft required explicit opt-in before any channel-registered plugin could run, but did not specify its form.
+An unspecified MUST cannot be tested. Prompting on every new digest would add a step beyond configuring the channel, and CI has no user to prompt.
+[Consent](#consent) instead defines required user controls, treats channel configuration as the consent boundary, and leaves further opt-in requirements to clients.
 
 ### A union over every subdir of the channel
 
-An earlier draft merged the registrations of all subdirs of a channel.
-Rejected: a client would have to fetch repodata it has no other use for, and a registration in a subdir the solve does not touch describes a plugin the solve cannot install.
-Restricting the union to the loaded subdirs makes "register in `noarch` for everywhere, in a platform subdir for that platform" the natural spelling, and keeps registration lookup free.
+An earlier draft merged registrations from all subdirs of a channel.
+This would require fetching otherwise unused repodata and include registrations for plugins the solve cannot install.
+Using only loaded subdirs avoids extra requests. Channels can register plugins in `noarch` for all platforms or in a platform subdir for that platform alone.
 
 ## Rationale
 
 ### Why the channel and not the client
 
-The party that builds packages against a capability is the party that knows how to detect it, and is already shipping conda packages.
-Every alternative puts that knowledge somewhere it has to be duplicated: in each client, or in each user's configuration.
-
-Detection written once by that party, run identically by every client, is also what makes verdicts agree across clients, which a per-client plugin interface cannot promise.
+Package builders know how to detect their required capabilities and already ship conda packages. Keeping detection there avoids duplicating it across clients or user configurations.
+Running the same detector in every client also gives consistent verdicts, which per-client plugin interfaces cannot guarantee.
 
 ### Why names are assumed unique
 
@@ -407,16 +389,15 @@ The alternative was drafted and rejected; see [Per-channel views of a virtual pa
 
 ### Why the plugin comes from the registering channel
 
-A registration says "run my package".
-If the plugin itself could resolve from a related channel, a base channel serving a newer package of the same name would silently replace the registrant's detector with its own, and the registrant would have registered code it never saw.
-Dependencies may come from relations because that is what relations are for; the plugin may not, because that is what the registration is for.
+Restricting the plugin package to the registering channel preserves its choice of detector.
+Otherwise, a related base channel could serve a newer package with the same name and silently replace the detector with code the registering channel had not reviewed.
+Dependencies use relations for resolution, but the plugin package is the code the channel explicitly registered.
 
 ### Why two CEPs
 
-The plugin interface and the channel registration have different audiences and different lifetimes.
-A plugin author needs the plugin CEP and nothing else.
-A channel maintainer needs this one.
-A future registration source in client configuration needs the plugin CEP unchanged and a consent model of its own, which is why the consent model lives here rather than there.
+The plugin interface and channel registration have different audiences and lifetimes.
+Plugin authors need the plugin CEP; channel maintainers need this one.
+A future client-configuration registration source can reuse the plugin CEP unchanged while defining its own consent model. Channel consent therefore belongs here.
 
 ## References
 
