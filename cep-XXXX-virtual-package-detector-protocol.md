@@ -19,7 +19,8 @@
 
 A virtual package detector is a conda package with an executable that reports virtual packages as JSON.
 Clients install it in a dedicated environment and use its results in the solve.
-This CEP defines that protocol independently of the client's implementation language; [CEP XXXX (Channel Registration of Virtual Package Detectors)](./cep-XXXX-channel-registration-of-virtual-package-detectors.md) defines discovery through channels.
+This CEP defines that protocol independently of the client's implementation language.
+Registration sources define discovery and package resolution.
 
 ## Motivation
 
@@ -33,26 +34,16 @@ For example, conda-forge's MPI detector must be installed in conda's own Python 
 
 ### Registrations
 
-A **registration** tells the client which detector to run, what virtual packages it reports and where to resolve it.
+A **registration** tells the client which detector to run and what virtual packages it reports.
 For example, conda-forge could port its [existing MPI detection](https://github.com/regro/conda-forge-conda-plugins) to a package named `mpi-detect`, reporting `__openmpi` and `__mpich`.
 
 | Field | Meaning | Example value |
 | --- | --- | --- |
 | Origin | Source-defined identifier | `"https://conda.anaconda.org/conda-forge"` |
 | Detector name | Lowercase normalized package name, also used as the executable name | `"mpi-detect"` |
-| Declared names | Non-empty set of virtual package names it reports | `["__openmpi", "__mpich"]` |
-| Resolution channels | Ordered, non-empty list of channels for resolving the detector and its dependencies | `["https://conda.anaconda.org/conda-forge"]` |
+| Virtual package names | Non-empty set of virtual package names it reports | `["__openmpi", "__mpich"]` |
 
-The channel's [registration metadata](./cep-XXXX-channel-registration-of-virtual-package-detectors.md#registration-metadata) gives the detector name and declared names.
-The channel URL and relations determine the other two fields.
-
-Origin and detector name identify the registration for disabling, pinning and caching.
-A **registration source**, such as the channel CEP, supplies these fields.
-The source MUST define consent and how users withhold it.
-It MUST define collision handling that assigns each name and override variable to at most one registration per solve, and define how invalid declared names are handled without passing them to the client.
-Names still assigned to a registration and not [overridden](#overrides) are its **applicable names**.
-
-Declared names MUST satisfy [CEP 26](./cep-0026.md), begin with two underscores, contain at most 64 characters, and match:
+Virtual package names MUST satisfy [CEP 26](./cep-0026.md), begin with two underscores, contain at most 64 characters, and match:
 
 ```re
 ^__[a-z0-9][._-]?([a-z0-9]+(\.|-|_|$))*$
@@ -60,27 +51,28 @@ Declared names MUST satisfy [CEP 26](./cep-0026.md), begin with two underscores,
 
 For example, `__openmpi` is valid; `openmpi` and `__mpi/openmpi` are not.
 
+A detector MAY declare detectors that include defined virtual packages defined in [CEP 30](./cep-0030.md). This allows to test new versions of existing virtual packages without requiring to update clients first.
+
 A name's **override variable** is `CONDA_OVERRIDE_` followed by the name without its two leading underscores, uppercased, with `-` and `.` replaced by `_`.
 Thus `__conda-forge_mpi` and `__conda_forge_mpi` both map to `CONDA_OVERRIDE_CONDA_FORGE_MPI` and collide despite being different names.
 
 ### The detector package
 
-A detector MUST contain an executable named after its normalized package name in a [CEP 32](./cep-0032.md) environment `PATH` directory.
-On Windows it MUST have an `.exe`, `.cmd` or `.bat` extension.
+The detector name MUST be a valid package name according to [CEP 32](./cep-0032.md).
+
+A detector MUST contain an executable named after its normalized package name in a [CEP 32](./cep-0032.md) environment `PATH` directory. On Windows it MUST have an `.exe`, `.cmd` or `.bat` extension.
 
 A detector MAY have dependencies, but its direct and transitive virtual-package dependencies MUST be limited to names the client is required to provide under CEP 30 or later virtual-package CEPs.
 The detector and its dependencies MUST NOT rely on pre-link, post-link or pre-unlink scripts.
 Detectors SHOULD minimize and pin dependencies.
 
-The detector MUST be resolvable from its resolution channels for the **host platform**, the machine running the client (CEP 30's native platform).
+The detector MUST be resolvable for the **host platform**, the machine running the client (CEP 30's native platform), as defined by the registration source.
 
 ### Resolution and installation
 
-Clients MUST resolve a [CEP 29](./cep-0029.md) MatchSpec containing only the detector name, except that a source MAY require a channel qualifier naming a resolution channel.
-A source MUST NOT add version or build constraints. Ordinary solver preferences determine the build.
-
-Resolution MUST use only the resolution channels, in their given order, loading their host and `noarch` subdirs.
-The only virtual packages available MUST be the client's own CEP 30 virtual packages, honoring `CONDA_OVERRIDE_*`; detector results MUST NOT participate.
+Clients MUST resolve a [CEP 29](./cep-0029.md) MatchSpec containing only the detector name for the host platform, as defined by the registration source.
+A source MAY require a channel qualifier but MUST NOT add version or build constraints. Ordinary solver preferences determine the build.
+The only virtual packages available MUST be the client's own CEP 30 virtual packages, honoring `CONDA_OVERRIDE_*`. Detector results MUST NOT participate.
 
 Before execution or result-cache lookup, clients MUST resolve against current repodata and compute the [environment digest](#environment-digest), a fingerprint of all resolved package records.
 Clients MUST reuse a detector environment only if its digest matches; otherwise they must install the newly resolved packages.
@@ -93,25 +85,22 @@ Installation MUST follow CEP 32 and [CEP 34](./cep-0034.md), with these restrict
 - Clients MAY skip byte compilation of `noarch: python` packages ([CEP 20](./cep-0020.md)); if performed, it SHOULD be bounded like activation.
 - Clients MUST NOT run detectors from incomplete installations and MUST prevent concurrent installations of the same digest from corrupting each other.
 
-Clients MAY share environments between registrations with identical resolved packages.
+Clients MAY share environments between registrations with identical digest.
 
 ### Running a detector
 
-The **target platform** is the platform being solved for.
-Clients MUST NOT run detectors when it differs from the host platform.
-In that case, detector-provided names are absent unless overridden, except for values CEP 30 or later virtual-package CEPs require the client to supply for the target.
+The target platform is the platform being solved for.
+Clients MUST NOT run detectors when it differs from the host platform (with overrides taken into account).
+If host- and target platforms mismatch, then detector-provided names are absent unless overridden, except for values CEP 30 or later virtual-package CEPs require the client to supply for the target.
 Clients SHOULD warn once per skipped registration and name its override variables.
 
-Clients MUST NOT run registrations that are disabled, lack required consent or have no applicable names.
-Otherwise they use a valid cache entry or execute the detector.
-
 Clients SHOULD avoid execution when no applicable name can affect the solve.
-They MAY conservatively scan fetched records' `depends` and `constrains` fields, including sharded repodata, together with user-requested specs.
 They MUST NOT skip a registration whose applicable names the solve could reference, or rely on exact prediction or skipping for correctness.
+Clients MAY cache results and avoid re-running the dector while the cache is valid.
 
 To execute a detector, the client MUST:
 
-1. Evaluate the detector environment's activation scripts, including dependencies' scripts, as for normal activation. Activation output is excluded from the report.
+1. Evaluate the detector environment's activation scripts, including dependencies' scripts, as for normal activation.
 2. Prepend the environment's `PATH` directories in CEP 32 order to the inherited `PATH`.
 3. Find the normalized detector executable only in those directories, in that order. On Windows, try `.exe`, `.cmd` and `.bat` in that order within each directory.
 4. Start it with no arguments, no input on standard input, and the activated environment. The working directory is unspecified.
@@ -146,51 +135,42 @@ On a host with Open MPI 5.0.10 but no MPICH, `mpi-detect` could report:
 }
 ```
 
-- `version`: REQUIRED integer, currently `1`. Missing or unsupported versions fail the detector.
-- `virtual_packages`: REQUIRED object keyed by virtual package name, compared after lowercase normalization. Each result MUST be `null` for absence or an object with a REQUIRED `version` string conforming to [CEP 33](./cep-0033.md) and an OPTIONAL `build_string` string conforming to CEP 26, defaulting to `0`.
-- `cache`: OPTIONAL object of hints defined in [Caching](#caching).
+This file is the detectors report.
+Each detector called MUST produce exactly one report.
 
-Standardized names follow their CEP's version and build semantics.
-For other names, the publisher decides and SHOULD put versions in the version field so ordinary constraints work.
+- `version`: REQUIRED integer, currently `1`. Missing or unsupported versions fail the detector.
+- `virtual_packages`: REQUIRED object keyed by virtual package name, compared after normalization. Each result MUST be `null` for absence or an object with a REQUIRED `version` string conforming to [CEP 33](./cep-0033.md) and an OPTIONAL `build_string` string conforming to CEP 26, defaulting to `0`.
+- `cache`: OPTIONAL object of hints defined in [Caching](#caching).
 
 Clients MUST ignore unknown top-level keys and unknown keys inside a virtual package result.
 Known fields with wrong types are malformed.
-Each decoded version and build string MUST occupy at most 256 UTF-8 bytes.
-Each watch list MUST contain at most 32 strings of at most 4096 UTF-8 bytes each after decoding.
-Exceeding these limits makes the report malformed.
-
-Clients MUST reject duplicate `virtual_packages` entries, including names equal after normalization, and MUST validate the complete report before using results.
-Every declared name MUST occur, and no undeclared name is allowed.
+Each watch list MUST contain at most 32 strings, each at most 4096 UTF-8 bytes after decoding.
+Exceeding either limit makes the report malformed.
+Duplicate or missing detector names make the report malformed.
+Any missing or undeclared virtual package name makes the report malformed.
+The report MUST contain every virtual package name from the registration and no other name.
 In the example, `null` reports absent MPICH; omitting `__mpich` would violate the contract.
-Malformed or incomplete reports fail the entire detector.
-Only after validation MUST clients discard results for names assigned elsewhere or overridden.
+If a virtual package name matches one defined in [CEP 30](./cep-0030.md) or a related CEP, the detector MUST NOT set the value to `null`.
 
-### Results in the solve
-
-A present result contributes one virtual package record with its name, version and build string; `null` contributes none, subject to the standardized-name rules below.
-Each name has at most one record for the whole solve, shared across channels.
-[CEP 29](./cep-0029.md) matching and ordinary solver behavior apply.
-
-For standardized names, clients MUST replace their detected value with an applicable detector's present result.
-They MUST still supply values required by CEP 30 or later virtual-package CEPs if the detector reports `null`, fails or is skipped.
-A failed or skipped registration MUST NOT remove another registration's result, an override or a required target-platform client value.
+Clients MUST MUST rejected any malformed report in their entirety.
+The client MUST NOT invalidate valid reports form other detectors.
 
 ### Overrides
 
-Clients MUST support each nonstandard declared name's [override variable](#registrations):
+Clients MUST support an [override variable](#registrations) for each of its virtual package names:
 
 - A nonempty value MUST be parsed as a version, optionally followed by `=` and a build string; the default build string is `0`.
 - An empty value MUST mean absence.
 - An invalid value MUST be an error, not a warning or a fallback to detection.
 
-Standardized names follow their defining CEPs: `CONDA_OVERRIDE_ARCHSPEC` sets the build string, `CONDA_OVERRIDE_UNIX` has no effect, and empty [`CONDA_OVERRIDE_CUDA_ARCH`](./cep-0046.md) means absence.
+Standardized virtual package names follow their defining CEPs: `CONDA_OVERRIDE_ARCHSPEC` sets the build string, `CONDA_OVERRIDE_UNIX` has no effect, and empty [`CONDA_OVERRIDE_CUDA_ARCH`](./cep-0046.md) means absence.
 
 An override replaces the whole result for the assigned name, including its build string. It never applies to shadowed names or alternative registrations.
 
 ### Caching
 
 Clients SHOULD cache results.
-A caching client MUST key entries on registration identity, declared names and environment digest.
+A caching client MUST key entries on registration identity, virtual package names and environment digest.
 The optional `cache` object MAY contain:
 
 | Field | Meaning |
@@ -263,7 +243,7 @@ Publishers SHOULD treat detectors as security-relevant code and SHOULD sign them
 Executables can probe libraries, make `ioctl` calls and invoke vendor tools.
 A declarative language or WASM interface would require clients to anticipate those host APIs; executables also support ordinary shell and Python scripts.
 
-Declaring names makes a detector's possible results inspectable before execution.
+Listing virtual package names makes a detector's possible results inspectable before execution.
 Self-enumeration would add a second invocation that checks the detector against itself.
 
 The 30-second default accommodates [slow Python startup on Windows CI](https://github.com/conda/ceps/pull/188#discussion_r3896136098); the 300-second ceiling bounds the wait for hung detection.

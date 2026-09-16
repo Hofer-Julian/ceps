@@ -56,7 +56,7 @@ An absent field or empty dictionary registers no detectors. Otherwise:
 - The value MUST be a dictionary mapping detector package names to arrays of virtual package names. `null` and wrong-shaped values are registration errors.
 - Each key MUST be a valid installable package name, not a virtual package name beginning with `__`, and MUST name a package served by the declaring channel in one of its subdirs. An invalid key is a registration error; failure to resolve a syntactically valid name is a [detector failure](./cep-XXXX-virtual-package-detector-protocol.md#failure-handling).
 - Each array MUST contain 1 to 16 entries before invalid names are dropped. Names MUST satisfy the detector protocol's [name rules](./cep-XXXX-virtual-package-detector-protocol.md#registrations).
-- Clients MUST drop invalid virtual package names, SHOULD report them, and MUST ignore detectors left with no valid names. The remaining names are the registration's **declared names**.
+- Clients MUST drop invalid virtual package names, SHOULD report them, and MUST ignore detectors left with no valid names. The remaining names are the registration's **virtual package names**.
 
 #### Loaded subdirs and limits
 
@@ -70,7 +70,7 @@ The following are registration errors across the loaded subdirs:
 - An array outside the 1 to 16 entry limit, or a detector's union exceeding 16 names, counted before invalid names are dropped.
 - More than 64 distinct detectors, counted before empty registrations are removed.
 - Two detectors declaring the same normalized virtual package name, or a duplicate normalized name within one array. Repeating a name for the same detector in different subdirs is allowed.
-- Distinct declared names mapping to the same [override variable](./cep-XXXX-virtual-package-detector-protocol.md#registrations).
+- Distinct virtual package names mapping to the same [override variable](./cep-XXXX-virtual-package-detector-protocol.md#registrations).
 - Duplicate normalized detector keys within one subdir's dictionary. Clients whose JSON parser cannot expose duplicate keys need not detect them.
 
 Clients MUST report any registration error and ignore the channel's entire registration set across all loaded subdirs.
@@ -96,7 +96,7 @@ Disabling or failing the winner MUST NOT enable a shadowed registration as a fal
 
 A fully shadowed registration MUST NOT run.
 Clients SHOULD report skipped registrations and the winning channel for each shadowed name.
-A partially shadowed registration remains eligible: clients MUST validate its complete report against all declared names before discarding shadowed results, as specified in [The report](./cep-XXXX-virtual-package-detector-protocol.md#the-report).
+A partially shadowed registration remains eligible: clients MUST validate its complete report against all virtual package names before discarding shadowed results, as specified in [The report](./cep-XXXX-virtual-package-detector-protocol.md#the-report).
 Overrides apply only to the winning name and registration.
 
 ### Resolution and participation
