@@ -34,7 +34,7 @@ For example, conda-forge's MPI detector must be installed in conda's own Python 
 
 ### Registrations
 
-A **registration** tells the client which detector to run and what virtual packages it reports.
+A registration tells the client which detector to run and what virtual packages it reports.
 For example, conda-forge could port its [existing MPI detection](https://github.com/regro/conda-forge-conda-plugins) to a package named `mpi-detect`, reporting `__openmpi` and `__mpich`.
 
 | Field | Meaning | Example value |
@@ -53,7 +53,7 @@ For example, `__openmpi` is valid; `openmpi` and `__mpi/openmpi` are not.
 
 A detector MAY declare detectors that include defined virtual packages defined in [CEP 30](./cep-0030.md). This allows to test new versions of existing virtual packages without requiring to update clients first.
 
-A name's **override variable** is `CONDA_OVERRIDE_` followed by the name without its two leading underscores, uppercased, with `-` and `.` replaced by `_`.
+A name's override variable is `CONDA_OVERRIDE_` followed by the name without its two leading underscores, uppercased, with `-` and `.` replaced by `_`.
 Thus `__conda-forge_mpi` and `__conda_forge_mpi` both map to `CONDA_OVERRIDE_CONDA_FORGE_MPI` and collide despite being different names.
 
 ### The detector package
@@ -192,13 +192,38 @@ Every entry MUST expire.
 
 #### Environment digest
 
-Clients MUST compute the digest from every resolved package record, including the detector:
+Clients MUST compute the environment digest from every resolved package record in the detector environment, including the detector itself.
+These are ordinary conda package records. Virtual package records MUST NOT be included.
 
-1. Form `<name>\t<version>\t<build>\t<artifact>` for each record, using the normalized lowercase name and verbatim `version` and `build` strings. For `<artifact>`, use non-null `sha256` in lowercase hexadecimal, otherwise non-null `md5` in lowercase hexadecimal, otherwise the file name (`fn`).
-2. Sort the lines bytewise ascending.
-3. Join with `\n` without a trailing newline, encode as UTF-8, and compute SHA-256, rendered as lowercase hexadecimal.
+For each record, clients MUST form a line with four fields separated by a single tab (`U+0009`), in this order:
 
-CEP 26 excludes tabs and newlines from these fields.
+1. The normalized package name.
+2. The verbatim version string.
+3. The verbatim build string.
+4. The package artifact, identified by the first value present:
+   1. Any hash value allowed by [CEP 36](./cep-36.md) for package authentication
+   2. The serialized package URL.
+5. All fields and separators must be utf8 encoded.
+
+Clients MUST sort the lines in ascending order by their UTF-8 bytes and join them with a single line feed (`U+000A`) between adjacent lines.
+There MUST NOT be a line feed after the last line.
+The environment digest is the SHA-256 hash of the resulting UTF-8 bytes, encoded as lowercase hexadecimal.
+
+[CEP 26](./cep-0026.md) forbids tab and linefeed characters from the first three fields and hashes or URLs may not contain them either. For this reason they are safe to use as separators.
+
+For example, consider a detector environment with these records:
+
+- `mpi-detect` version `1.0.0`, build `h123_0`, and SHA-256 `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`.
+- `python` version `3.13.7`, build `h456_0`, no package hash, and URL `https://conda.example/linux-64/python-3.13.7-h456_0.conda`.
+
+The sorted input is shown below with `<TAB>` standing for one tab:
+
+```text
+mpi-detect<TAB>1.0.0<TAB>h123_0<TAB>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+python<TAB>3.13.7<TAB>h456_0<TAB>https://conda.example/linux-64/python-3.13.7-h456_0.conda
+```
+
+With one line feed between the two lines and none after the second, the environment digest is `6050e025841a00c866b37c4b843b1f6bea2be6209fff9deb40303bab8861962a`.
 
 ### Failure handling
 
@@ -206,48 +231,12 @@ Resolution or installation errors, failed or timed-out activation, missing execu
 
 A detector failure MUST NOT abort the solve on its own.
 Clients MUST discard all of that detector's results atomically, including valid entries, while preserving overrides, other registrations' results and required client-provided values.
-Other applicable names are absent, so the solver can report unsatisfiable dependencies normally.
 Clients MUST report every detector failure and its captured diagnostics, even if the solve succeeds.
-
-### User controls
-
-Clients MUST record the registration and environment digest for each detector result used.
-On request, they MUST show known registrations, the resolved packages behind each digest and each detector's reported results.
-They MUST NOT misattribute detector results, client detection or overrides in any retained information or diagnostics.
-When a registration's digest differs from the one last executed, clients MUST report the old and new digests.
-A source MAY require further approval.
-
-Clients MUST provide persistent configuration to disable registrations by origin and detector name; its format is client-defined.
-They MUST also offer an operation to discard cached detector results and detector environments without clearing unrelated data.
-
-Sources define whether clients must offer digest pins. Any pin facility MUST compare the exact [environment digest](#environment-digest), including dependencies.
-A mismatch MUST prevent execution and result-cache reuse and be handled as a detector failure.
 
 ## Backwards compatibility
 
-The protocol uses ordinary conda packages and virtual package records; it changes neither package metadata nor MatchSpec syntax.
-
-## Security considerations
-
-Detection runs third-party code before the target environment transaction, with the user's privileges.
-Dedicated environments and resource bounds are not a sandbox: detectors can read files, access the network and persist.
-Consent covers resolved dependencies, activation scripts, optional Python byte compilation, invoked vendor tools and future updates allowed by dependency constraints.
-
-Clients MUST present approval of an origin or detector as approval of its dependencies now and in future resolutions.
-Digest pins constrain resolved records without authenticating artifacts or verifying installed files.
-Signing a detector alone does not attest its dependencies.
-Publishers SHOULD treat detectors as security-relevant code and SHOULD sign them where supported, such as through [CEP 27](./cep-0027.md).
-
-## Rationale
-
-Executables can probe libraries, make `ioctl` calls and invoke vendor tools.
-A declarative language or WASM interface would require clients to anticipate those host APIs; executables also support ordinary shell and Python scripts.
-
-Listing virtual package names makes a detector's possible results inspectable before execution.
-Self-enumeration would add a second invocation that checks the detector against itself.
-
-The 30-second default accommodates [slow Python startup on Windows CI](https://github.com/conda/ceps/pull/188#discussion_r3896136098); the 300-second ceiling bounds the wait for hung detection.
-Link scripts would add unbounded installation-time execution; bounded activation supplies setup instead.
+Existing virtual packages as defined in [CEP 30](./cep-0030.md) continue to work.
+However, virtual package detectors are allowed to overrule virtual packages.
 
 ## Copyright
 
