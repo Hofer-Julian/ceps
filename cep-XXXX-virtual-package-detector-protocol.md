@@ -35,13 +35,13 @@ For example, conda-forge's MPI detector must be installed in conda's own Python 
 ### Registrations
 
 A registration tells the client which detector to run and what virtual packages it reports.
-For example, conda-forge could port its [existing MPI detection](https://github.com/regro/conda-forge-conda-plugins) to a package named `mpi-detect`, reporting `__openmpi` and `__mpich`.
+For example, conda-forge could port its [existing MPI detection](https://github.com/regro/conda-forge-conda-plugins) to a package named `mpi-detect`, reporting `__conda_forge_openmpi` and `__conda_forge_mpich`.
 
 | Field | Meaning | Example value |
 | --- | --- | --- |
 | Origin | Source-defined identifier | `"https://conda.anaconda.org/conda-forge"` |
 | Detector name | Lowercase normalized package name, also used as the executable name | `"mpi-detect"` |
-| Virtual package names | Non-empty set of virtual package names it reports | `["__openmpi", "__mpich"]` |
+| Virtual package names | Non-empty set of virtual package names it reports | `["__conda_forge_openmpi", "__conda_forge_mpich"]` |
 
 Virtual package names MUST satisfy [CEP 26](./cep-0026.md), begin with two underscores, contain at most 64 characters, and match:
 
@@ -49,7 +49,7 @@ Virtual package names MUST satisfy [CEP 26](./cep-0026.md), begin with two under
 ^__[a-z0-9][._-]?([a-z0-9]+(\.|-|_|$))*$
 ```
 
-For example, `__openmpi` is valid; `openmpi` and `__mpi/openmpi` are not.
+For example, `__conda_forge_openmpi` is valid; `openmpi` and `__mpi/openmpi` are not.
 
 A detector MAY declare detectors that include defined virtual packages defined in [CEP 30](./cep-0030.md). This allows to test new versions of existing virtual packages without requiring to update clients first.
 
@@ -124,8 +124,8 @@ On a host with Open MPI 5.0.10 but no MPICH, `mpi-detect` could report:
 {
   "version": 1,
   "virtual_packages": {
-    "__openmpi": { "version": "5.0.10", "build_string": "0" },
-    "__mpich": null
+    "__conda_forge_openmpi": { "version": "5.0.10", "build_string": "0" },
+    "__conda_forge_mpich": null
   },
   "cache": {
     "ttl_seconds": 86400,
@@ -149,7 +149,7 @@ Exceeding either limit makes the report malformed.
 Duplicate or missing detector names make the report malformed.
 Any missing or undeclared virtual package name makes the report malformed.
 The report MUST contain every virtual package name from the registration and no other name.
-In the example, `null` reports absent MPICH; omitting `__mpich` would violate the contract.
+In the example, `null` reports absent MPICH; omitting `__conda_forge_mpich` would violate the contract.
 If a virtual package name matches one defined in [CEP 30](./cep-0030.md) or a related CEP, the detector MUST NOT set the value to `null`.
 
 Clients MUST MUST rejected any malformed report in their entirety.

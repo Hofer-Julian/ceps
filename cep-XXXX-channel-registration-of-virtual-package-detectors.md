@@ -42,7 +42,7 @@ For example, conda-forge could register a proposed `mpi-detect` package to repor
   "info": {
     "subdir": "linux-64",
     "virtual_package_detectors": {
-      "mpi-detect": ["__openmpi", "__mpich"]
+      "mpi-detect": ["__conda_forge_openmpi", "__conda_forge_mpich"]
     }
   }
 }
@@ -85,47 +85,27 @@ A channel serving both forms MUST publish consistent registrations. Clients need
 
 A virtual package name has one meaning throughout a solve.
 For names not standardized by a CEP, channels SHOULD include their channel name, for example `__conda_forge_mpi_abi` rather than `__mpi_abi`.
-The MPI examples retain the names used by the existing conda detector.
 Channels SHOULD register standardized names only to replace client detection, following the detector protocol's [standardized-name rules](./cep-XXXX-virtual-package-detector-protocol.md#results-in-the-solve).
 
-Different channels MAY register the same name.
-The first channel in CEP 42's resolved order MUST win for both identical normalized names and distinct names mapping to the same override variable.
-The lower-priority name is shadowed. A channel reached through multiple relation paths counts once.
-Disabling or failing the winner MUST NOT enable a shadowed registration as a fallback.
-
-A fully shadowed registration MUST NOT run.
-Clients SHOULD report skipped registrations and the winning channel for each shadowed name.
-A partially shadowed registration remains eligible: clients MUST validate its complete report against all virtual package names before discarding shadowed results, as specified in [The report](./cep-XXXX-virtual-package-detector-protocol.md#the-report).
-Overrides apply only to the winning name and registration.
+Clients MUST be able to deal with different channels registering the same virtual package names.
+The first channel in CEP 42's resolved order MUST win for both identical normalized names and distinct names mapping to the same override variable and MUST be used for all solves of the virtual packages it provides in *all* channels.
+The losing detectors MUST not be run, any virtual packages contributed by losing detectors not covered elsewhere MUST be treated as not available.
 
 ### Resolution and participation
 
-A registration's origin is the registering channel's CEP 26 base URL.
-Its resolution channels are the ordered channels CEP 42 would resolve with that channel as the only user-specified channel, using relations from its loaded subdirs and the client's usual depth limit.
+A registration's origin is the registering channel's [CEP 26](./cep-0026.md) base URL.
+
+Its resolution channels are the ordered channels [CEP 42](./cep-0042.md) would resolve with that channel.
 If a cycle or depth limit prevents relation resolution, clients MUST use the registering channel alone and SHOULD warn.
-
-The detector's MatchSpec MUST be qualified with the registering channel.
-Its dependencies MUST resolve only from the resolution channels, excluding unrelated user-configured channels.
-A related channel's newer, same-named package therefore cannot replace the registered detector.
-
-Clients MUST run participating detectors subject to shadowing and the detector protocol's [execution rules](./cep-XXXX-virtual-package-detector-protocol.md#running-a-detector), then apply its [solver integration rules](./cep-XXXX-virtual-package-detector-protocol.md#results-in-the-solve).
 
 ### Consent and user controls
 
 Configuring a channel consents to running its registered detectors, including those of channels loaded through its relations.
-Clients MAY require additional opt-in and MUST NOT run detectors from channels outside the solve.
-
-Clients MUST provide persistent configuration to:
-
-- Disable an origin or an individual registration identified by origin and detector name.
-- Pin a registration to an exact [environment digest](./cep-XXXX-virtual-package-detector-protocol.md#environment-digest). A mismatch MUST fail the detector and report both digests.
-- Override a detector-provided name or declare it absent, alongside the detector protocol's [environment-variable overrides](./cep-XXXX-virtual-package-detector-protocol.md#overrides).
-
-Clients MUST also provide the detector protocol's [reporting and cache-clearing controls](./cep-XXXX-virtual-package-detector-protocol.md#user-controls).
+Clients MAY require additional opt-in.
 
 ## Example
 
-Suppose conda-forge registers `mpi-detect` as above and adds `__openmpi >=5.0,<6.0a0` to an external Open MPI build's dependencies.
+Suppose conda-forge registers `mpi-detect` as above and adds `__conda_forge_openmpi >=5.0,<6.0a0` to an external Open MPI build's dependencies.
 When solving for that build on the host platform, the client installs `mpi-detect` and its dependencies from conda-forge in a detector environment.
 The detector finds `/opt/openmpi/bin/ompi_info` on `PATH`, identifies Open MPI 5.0.10, and reports:
 
@@ -133,14 +113,14 @@ The detector finds `/opt/openmpi/bin/ompi_info` on `PATH`, identifies Open MPI 5
 {
   "version": 1,
   "virtual_packages": {
-    "__openmpi": { "version": "5.0.10" },
-    "__mpich": null
+    "__conda_forge_openmpi": { "version": "5.0.10" },
+    "__conda_forge_mpich": null
   }
 }
 ```
 
-The `__openmpi 5.0.10` record satisfies the dependency through ordinary MatchSpec matching.
-Without Open MPI, the detector reports `null` for `__openmpi` too, leaving that external build's dependency unsatisfiable.
+The `__conda_forge_openmpi 5.0.10` record satisfies the dependency through ordinary MatchSpec matching.
+Without Open MPI, the detector reports `null` for `__conda_forge_openmpi` too, leaving that external build's dependency unsatisfiable.
 Packages from other channels, including those that load conda-forge through a relation, use the same result.
 
 ## Backwards compatibility
@@ -148,24 +128,6 @@ Packages from other channels, including those that load conda-forge through a re
 The optional `info.virtual_package_detectors` field requires no `repodata_version` change.
 Under CEP 36, clients SHOULD ignore unrecognized `info` keys; clients without detector support cannot satisfy dependencies on names they do not otherwise provide.
 Channels without registrations are unaffected, and detector packages need no new `index.json` fields.
-
-## Security considerations
-
-Channel detectors run before the solve completes, even if none of the channel's packages is ultimately installed.
-Trust extends to dependencies from related channels and future updates.
-The detector protocol's [security considerations](./cep-XXXX-virtual-package-detector-protocol.md#security-considerations) also apply.
-
-Channels SHOULD treat detectors as security-relevant code, sign them where supported by mechanisms such as [CEP 27](./cep-0027.md), and keep dependencies few and pinned.
-They SHOULD register detectors only in their intended subdirs.
-
-## Rationale
-
-Putting registrations in repodata's `info` dictionary follows CEP 42 and avoids a separate request, cache and schema for usually absent metadata.
-
-Keying the map by detector lets one process report several names without clients regrouping a name-to-detector map.
-Channels control detector versions through the builds they serve, removing older builds or moving them to a label when needed.
-
-MatchSpecs match one name across the solve. Channel-specific names inside the solver would require dependency rewriting; distinctive public names and channel priority avoid this.
 
 ## Copyright
 
