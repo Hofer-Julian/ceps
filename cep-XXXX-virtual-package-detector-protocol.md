@@ -150,10 +150,16 @@ Duplicate or missing detector names make the report malformed.
 Any missing or undeclared virtual package name makes the report malformed.
 The report MUST contain every virtual package name from the registration and no other name.
 In the example, `null` reports absent MPICH; omitting `__conda_forge_mpich` would violate the contract.
-If a virtual package name matches one defined in [CEP 30](./cep-0030.md) or a related CEP, the detector MUST NOT set the value to `null`.
+For standardized virtual package names, detectors MUST follow the presence and absence rules of their defining CEPs.
 
 Clients MUST MUST rejected any malformed report in their entirety.
 The client MUST NOT invalidate valid reports form other detectors.
+
+### Results in the solve
+
+Clients MUST use the selected detector's successful result in place of any client-provided result for the same name.
+A non-null result replaces the whole record; `null` makes the name absent.
+Applicable overrides MUST take precedence.
 
 ### Overrides
 

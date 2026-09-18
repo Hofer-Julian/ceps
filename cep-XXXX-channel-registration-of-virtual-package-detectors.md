@@ -57,14 +57,14 @@ An absent field or empty dictionary registers no detectors. Otherwise:
 - The value MUST be a dictionary mapping detector package names to arrays of virtual package names. `null` and wrong-shaped values are registration errors.
 - Each key MUST be a valid installable package name, not a virtual package name beginning with `__`, and MUST name a package served by the declaring channel in one of its subdirs. An invalid key is a registration error.
   Failure to resolve a syntactically valid name is a [detector failure](./cep-XXXX-virtual-package-detector-protocol.md#failure-handling).
-- Each array MUST contain 1 to 16 entries. Any entry exceeding that MUST be dropped. Names MUST satisfy the detector protocol's [name rules](./cep-XXXX-virtual-package-detector-protocol.md#registrations).
+- Each array MUST contain 1 to 16 entries. Names MUST satisfy the detector protocol's [name rules](./cep-XXXX-virtual-package-detector-protocol.md#registrations).
 - Clients MUST drop invalid virtual package names, SHOULD report them, and MUST ignore detectors left with no valid names. The remaining names are the registration's virtual package names.
 
 #### Subdirs and limits
 
-Clients MUST combine registrations from all subdirs.
+Clients MUST combine registrations from the target platform's subdir and `noarch` only.
 
-The following are registration errors across subdirs:
+The following are registration errors in the combined registration set:
 
 - Detectors in different subdirs with the same normalized name and specifying different virtual packages.
 - An array outside the 1 to 16 entry limit, or a detector's union exceeding 16 names, counted before invalid names are dropped.
@@ -73,7 +73,7 @@ The following are registration errors across subdirs:
 - Distinct virtual package names mapping to the same [override variable](./cep-XXXX-virtual-package-detector-protocol.md#registrations).
 - Duplicate normalized detector keys within one subdir's dictionary. Clients whose JSON parser cannot expose duplicate keys need not detect them.
 
-Clients MUST report any registration error and ignore the channel's entire registration set across all subdirs.
+Clients MUST report any registration error and ignore the channel's entire combined registration set.
 They MUST NOT reject the surrounding repodata or abort the solve.
 
 #### Sharded repodata
@@ -88,8 +88,10 @@ For names not standardized by a CEP, channels SHOULD include their channel name,
 Channels SHOULD register standardized names only to replace client detection, following the detector protocol's [standardized-name rules](./cep-XXXX-virtual-package-detector-protocol.md#results-in-the-solve).
 
 Clients MUST be able to deal with different channels registering the same virtual package names.
-The first channel in CEP 42's resolved order MUST win for both identical normalized names and distinct names mapping to the same override variable and MUST be used for all solves of the virtual packages it provides in *all* channels.
-The losing detectors MUST not be run, any virtual packages contributed by losing detectors not covered elsewhere MUST be treated as not available.
+Clients MUST process registrations in CEP 42's resolved channel order.
+A registration MUST be rejected if any of its virtual package names conflicts with an already accepted registration by normalized name or override variable; otherwise it MUST be accepted.
+Accepted registrations reserve all their names for the solve across all channels.
+Rejected registrations reserve no names, and their detectors MUST NOT be run.
 
 ### Resolution and participation
 
